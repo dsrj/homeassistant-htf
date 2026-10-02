@@ -47,19 +47,11 @@ class ReturnTemperatureClient:
 
     def _login(self) -> None:
         """Log in to HTF."""
-        _LOGGER.debug(
-            "HTF return temperature: opening login page"
-        )
-
         response = self.session.get(
             f"{BASE}/login",
             timeout=30,
         )
         response.raise_for_status()
-
-        _LOGGER.debug(
-            "HTF return temperature: submitting login"
-        )
 
         response = self.session.post(
             f"{BASE}/umbraco/surface/login2/PostLogin",
@@ -76,10 +68,6 @@ class ReturnTemperatureClient:
             timeout=30,
         )
         response.raise_for_status()
-
-        _LOGGER.debug(
-            "HTF return temperature: opening dashboard"
-        )
 
         response = self.session.get(
             f"{BASE}/dashboard/",
@@ -157,10 +145,6 @@ class ReturnTemperatureClient:
         )
         response.raise_for_status()
 
-        _LOGGER.debug(
-            "HTF return temperature: consumption point selected"
-        )
-
     @staticmethod
     def _find_temperature_candidates(
         html: str,
@@ -173,23 +157,43 @@ class ReturnTemperatureClient:
             r"\b[A-Za-z_$][\w$]*[Tt]emp[\w$]*\b",
             r"\b[A-Za-z_$][\w$]*[Rr]eturn[\w$]*\b",
             r"\b[A-Za-z_$][\w$]*[Ff]remløb[\w$]*\b",
+            r"\b[A-Za-z_$][\w$]*[Rr]etur[\w$]*\b",
         )
 
         for pattern in patterns:
             candidates.update(
-                re.findall(
-                    pattern,
-                    html,
-                )
+                re.findall(pattern, html)
             )
 
         return sorted(candidates)
 
     @staticmethod
+    def _describe_element(element: Any) -> str:
+        """Return a safe structural description of an HTML element."""
+        description = element.name
+
+        element_id = element.get("id")
+        if element_id:
+            description += f"#{element_id}"
+
+        element_class = element.get("class")
+        if element_class:
+            if isinstance(element_class, list):
+                classes = " ".join(element_class)
+            else:
+                classes = str(element_class)
+
+            description += (
+                f".{classes.replace(' ', '.')}"
+            )
+
+        return description
+
+    @staticmethod
     def _find_relevant_elements(
         html: str,
     ) -> list[str]:
-        """Find HTML elements with temperature-related names."""
+        """Find HTML elements related to return temperature."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -198,15 +202,22 @@ class ReturnTemperatureClient:
         results: set[str] = set()
 
         for element in soup.find_all(
-            ["div", "span", "p", "td", "th", "script"],
+            [
+                "div",
+                "span",
+                "p",
+                "td",
+                "th",
+                "label",
+                "canvas",
+                "svg",
+                "script",
+            ]
         ):
             text = element.get_text(
                 " ",
                 strip=True,
             )
-
-            if not text:
-                continue
 
             lowered = text.lower()
 
@@ -217,44 +228,199 @@ class ReturnTemperatureClient:
                     "temperature",
                     "returtemperatur",
                     "return temperature",
+                    "returntemp",
+                    "returtemp",
                     "retur",
                 )
             ):
-                # Only record the tag and a short structural
-                # description. Do not log the actual contents.
-                element_id = element.get("id")
-                element_class = element.get("class")
-
-                description = element.name
-
-                if element_id:
-                    description += (
-                        f"#{element_id}"
+                results.add(
+                    ReturnTemperatureClient._describe_element(
+                        element
                     )
-
-                if element_class:
-                    classes = " ".join(
-                        element_class
-                        if isinstance(
-                            element_class,
-                            list,
-                        )
-                        else [str(element_class)]
-                    )
-
-                    description += (
-                        f".{classes.replace(' ', '.')}"
-                    )
-
-                results.add(description)
+                )
 
         return sorted(results)
 
     @staticmethod
-    def _find_json_scripts(
+    def _inspect_return_temperature_section(
+        html: str,
+    ) -> dict[str, Any]:
+        """Inspect the dedicated return-temperature page section."""
+        soup = BeautifulSoup(
+            html,
+            "html.parser",
+        )
+
+        section = soup.select_one(
+            "#returntemperature-page-section"
+        )
+
+        if section is None:
+            return {
+                "section_found": False,
+                "section_children": [],
+                "section_data_attributes": [],
+                "section_numeric_values": [],
+                "section_labels": [],
+            }
+
+        children: set[str] = set()
+        data_attributes: set[str] = set()
+        labels: set[str] = set()
+
+        for element in section.find_all(True):
+            children.add(
+                ReturnTemperatureClient._describe_element(
+                    element
+                )
+            )
+
+            for attribute_name, attribute_value in (
+                element.attrs.items()
+            ):
+                if attribute_name.startswith("data-"):
+                    data_attributes.add(
+                        f"{attribute_name}={attribute_value}"
+                    )
+
+            text = element.get_text(
+                " ",
+                strip=True,
+            )
+
+            lowered = text.lower()
+
+            if any(
+                term in lowered
+                for term in (
+                    "temperatur",
+                    "temperature",
+                    "retur",
+                    "returntemp",
+                )
+            ):
+                if text:
+                    # Keep only short structural labels.
+                    cleaned = " ".join(
+                        text.split()
+                    )
+
+                    if len(cleaned) <= 150:
+                        labels.add(cleaned)
+
+        # Numeric values are collected from the dedicated section,
+        # but only values that look like temperatures are retained.
+        section_text = section.get_text(
+            " ",
+            strip=True,
+        )
+
+        numeric_values: list[str] = []
+
+        for match in re.findall(
+            r"(?<![\d.,])\d{1,3}(?:[.,]\d{1,3})?(?![\d.,])",
+            section_text,
+        ):
+            try:
+                value = float(
+                    match.replace(",", ".")
+                )
+            except ValueError:
+                continue
+
+            # Return temperatures are normally in a human-readable
+            # Celsius range. This is only diagnostic filtering.
+            if -20 <= value <= 100:
+                numeric_values.append(match)
+
+        return {
+            "section_found": True,
+            "section_tag": section.name,
+            "section_id": section.get("id"),
+            "section_class": section.get("class"),
+            "section_children": sorted(children)[:100],
+            "section_data_attributes": sorted(
+                data_attributes
+            )[:100],
+            "section_numeric_values": numeric_values[:100],
+            "section_labels": sorted(labels)[:50],
+        }
+
+    @staticmethod
+    def _find_temperature_data_attributes(
         html: str,
     ) -> list[str]:
-        """Find script blocks that appear to contain temperature data."""
+        """Find data-* attributes whose names may contain temperature data."""
+        soup = BeautifulSoup(
+            html,
+            "html.parser",
+        )
+
+        results: set[str] = set()
+
+        for element in soup.find_all(True):
+            for name, value in element.attrs.items():
+                lowered = name.lower()
+
+                if (
+                    name.startswith("data-")
+                    and any(
+                        term in lowered
+                        for term in (
+                            "temp",
+                            "temperatur",
+                            "retur",
+                            "return",
+                        )
+                    )
+                ):
+                    results.add(
+                        f"{name}={value}"
+                    )
+
+        return sorted(results)[:100]
+
+    @staticmethod
+    def _find_chart_elements(
+        html: str,
+    ) -> list[str]:
+        """Find chart-related elements inside the return-temperature section."""
+        soup = BeautifulSoup(
+            html,
+            "html.parser",
+        )
+
+        section = soup.select_one(
+            "#returntemperature-page-section"
+        )
+
+        if section is None:
+            return []
+
+        results: set[str] = set()
+
+        for element in section.find_all(
+            [
+                "canvas",
+                "svg",
+                "iframe",
+                "img",
+                "script",
+            ]
+        ):
+            results.add(
+                ReturnTemperatureClient._describe_element(
+                    element
+                )
+            )
+
+        return sorted(results)
+
+    @staticmethod
+    def _find_temperature_scripts(
+        html: str,
+    ) -> list[str]:
+        """Find scripts containing return-temperature configuration."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -262,9 +428,7 @@ class ReturnTemperatureClient:
 
         results: list[str] = []
 
-        for script in soup.find_all(
-            "script"
-        ):
+        for script in soup.find_all("script"):
             text = script.string or script.get_text()
 
             if not text:
@@ -280,9 +444,10 @@ class ReturnTemperatureClient:
                     "returntemperature",
                     "return_temperature",
                     "returtemperatur",
+                    "returntemp",
+                    "returtemp",
                 )
             ):
-                # Record only the first line/shape, not the contents.
                 first_line = (
                     text.strip()
                     .splitlines()[0][:200]
@@ -291,9 +456,7 @@ class ReturnTemperatureClient:
                 )
 
                 if first_line:
-                    results.append(
-                        first_line
-                    )
+                    results.append(first_line)
 
         return results[:20]
 
@@ -321,8 +484,7 @@ class ReturnTemperatureClient:
                 )
 
             _LOGGER.debug(
-                "HTF return temperature: page received "
-                "(%s bytes)",
+                "HTF return temperature: page received (%s bytes)",
                 len(html),
             )
 
@@ -339,7 +501,25 @@ class ReturnTemperatureClient:
             )
 
             scripts = (
-                self._find_json_scripts(
+                self._find_temperature_scripts(
+                    html
+                )
+            )
+
+            section = (
+                self._inspect_return_temperature_section(
+                    html
+                )
+            )
+
+            data_attributes = (
+                self._find_temperature_data_attributes(
+                    html
+                )
+            )
+
+            chart_elements = (
+                self._find_chart_elements(
                     html
                 )
             )
@@ -362,13 +542,32 @@ class ReturnTemperatureClient:
                 len(scripts),
             )
 
+            _LOGGER.warning(
+                "HTF return temperature diagnostic: "
+                "section=%s",
+                section,
+            )
+
+            _LOGGER.warning(
+                "HTF return temperature diagnostic: "
+                "temperature data attributes=%s",
+                data_attributes,
+            )
+
+            _LOGGER.warning(
+                "HTF return temperature diagnostic: "
+                "chart elements=%s",
+                chart_elements,
+            )
+
             return {
                 "temperature": None,
                 "diagnostic_variables": candidates,
                 "diagnostic_elements": elements,
-                "diagnostic_script_count": len(
-                    scripts
-                ),
+                "diagnostic_script_count": len(scripts),
+                "diagnostic_section": section,
+                "diagnostic_data_attributes": data_attributes,
+                "diagnostic_chart_elements": chart_elements,
             }
 
         except requests.RequestException as err:
