@@ -1144,33 +1144,90 @@ class HTFReturnTemperature(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return raw and calculation diagnostics."""
+        """Return return-temperature information."""
         data = self.return_temperature()
 
         return {
             "source_date": data.get(
                 "date"
             ),
-            "target_temperature_c": data.get(
+            "good_temperature_c": data.get(
                 "target"
-            ),
-            "raw": data.get(
-                "raw"
-            ),
-            "meter_info": data.get(
-                "meter_info"
-            ),
-            "series": data.get(
-                "series"
-            ),
-            "chart_scale_y_max": data.get(
-                "return_temperature_chart_scale_y_max"
             ),
             "good_return_temperature_data": data.get(
                 "good_return_temperature_data"
             ),
             "calculation": (
-                "FV-RT / (FV-M3 / 100)"
+                "HTF /forbrug/: FV-RT / FV-M3"
+            ),
+        }
+
+
+class HTFGoodReturnTemperature(
+    HTFBaseSensor
+):
+    """HTF yearly good return-temperature target."""
+
+    _attr_name = (
+        "HTF Good Return Temperature"
+    )
+
+    _attr_native_unit_of_measurement = (
+        UnitOfTemperature.CELSIUS
+    )
+
+    _attr_device_class = "temperature"
+    _attr_state_class = "measurement"
+    _attr_icon = "mdi:thermometer-check"
+
+    def __init__(
+        self,
+        coordinator: HTFCoordinator,
+    ) -> None:
+        """Initialize."""
+        super().__init__(
+            coordinator
+        )
+
+        self._attr_unique_id = (
+            "htf_good_return_temperature"
+        )
+
+    @property
+    def native_value(
+        self,
+    ) -> float | None:
+        """Return the HTF target for the current data year."""
+        value = self.return_temperature().get(
+            "target"
+        )
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    @property
+    def extra_state_attributes(
+        self,
+    ) -> dict[str, Any]:
+        """Return yearly target information."""
+        data = self.return_temperature()
+        date_key = data.get(
+            "date"
+        )
+
+        return {
+            "year": (
+                str(date_key)[:4]
+                if date_key
+                else None
+            ),
+            "all_year_targets": data.get(
+                "good_return_temperature_data"
+            ),
+            "source": (
+                "HTF goodReturnTemperatureData"
             ),
         }
 
@@ -1348,6 +1405,9 @@ async def async_setup_entry(
                 coordinator
             ),
             HTFReturnTemperature(
+                coordinator
+            ),
+            HTFGoodReturnTemperature(
                 coordinator
             ),
             HTFBalance(
