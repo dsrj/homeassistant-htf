@@ -28,7 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class HTFClient:
-    """Client for the HTF customer portal."""
+    """Client for HTF Selvbetjening."""
 
     def __init__(self, customer: str, pin: str) -> None:
         self.customer = customer
@@ -48,10 +48,9 @@ class HTFClient:
         )
 
     def fetch(self) -> dict[str, Any]:
-        """Log in to HTF and retrieve consumption data."""
+        """Log in and retrieve HTF consumption data."""
 
-        # Step 1: Open the login page first.
-        # This allows HTF to create the ASP.NET session.
+        # 1. Open login page first to establish ASP.NET session.
         login_page = self.session.get(
             f"{BASE}/login",
             headers={
@@ -62,12 +61,11 @@ class HTFClient:
         login_page.raise_for_status()
 
         _LOGGER.debug(
-            "HTF login page: status=%s cookies=%s",
+            "HTF login page loaded: %s",
             login_page.status_code,
-            list(self.session.cookies.keys()),
         )
 
-        # Step 2: Submit the HTF login form.
+        # 2. Submit login credentials.
         login = self.session.post(
             f"{BASE}/umbraco/surface/login2/PostLogin",
             data={
@@ -85,16 +83,16 @@ class HTFClient:
             timeout=30,
             allow_redirects=True,
         )
+
         login.raise_for_status()
 
         _LOGGER.debug(
-            "HTF login result: status=%s url=%s cookies=%s",
+            "HTF login completed: status=%s url=%s",
             login.status_code,
             login.url,
-            list(self.session.cookies.keys()),
         )
 
-        # Step 3: Request the consumption page.
+        # 3. Fetch the consumption page.
         page = self.session.get(
             f"{BASE}/forbrug/",
             headers={
@@ -102,15 +100,15 @@ class HTFClient:
             },
             timeout=30,
         )
+
         page.raise_for_status()
 
         _LOGGER.debug(
-            "HTF consumption page: status=%s url=%s",
+            "HTF consumption page loaded: %s",
             page.status_code,
-            page.url,
         )
 
-        # Step 4: Extract the JSON embedded in the page.
+        # 4. Extract the JSON embedded in the page.
         soup = BeautifulSoup(
             page.text,
             "html.parser",
@@ -121,20 +119,18 @@ class HTFClient:
         )
 
         if not node:
-            # Don't log the page because it could contain
-            # personal customer information.
             raise RuntimeError(
-                "HTF login/session succeeded but "
-                "#consumption-data-json was not found "
-                "on /forbrug/. Check the HTF login response "
-                "and session handling."
+                "HTF consumption data was not found. "
+                "The login/session may not have succeeded."
             )
 
-        raw = node.get_text(strip=True)
+        raw = node.get_text(
+            strip=True
+        )
 
         if not raw:
             raise RuntimeError(
-                "HTF consumption-data-json is empty."
+                "HTF consumption data is empty."
             )
 
         try:
@@ -158,7 +154,7 @@ async def async_setup_entry(
     )
 
     async def update() -> dict[str, Any]:
-        """Fetch HTF data."""
+        """Fetch data from HTF."""
         return await hass.async_add_executor_job(
             client.fetch
         )
@@ -171,7 +167,15 @@ async def async_setup_entry(
         update_interval=SCAN_INTERVAL,
     )
 
-    await coordinator.async_config_entry_first_refresh()
+    # Do the first refresh here, but don't make platform setup fail
+    # if HTF is temporarily unavailable.
+    try:
+        await coordinator.async_refresh()
+    except Exception as err:
+        _LOGGER.error(
+            "Unexpected error fetching HTF consumption data: %s",
+            err,
+        )
 
     async_add_entities(
         [
@@ -182,7 +186,7 @@ async def async_setup_entry(
 
 
 class HTFBase(CoordinatorEntity):
-    """Base HTF sensor."""
+    """Base class for HTF sensors."""
 
     _attr_device_info = DeviceInfo(
         identifiers={(DOMAIN, "heating")},
@@ -199,18 +203,14 @@ class HTFBase(CoordinatorEntity):
             self.coordinator.data or {}
         ).get("meters", [])
 
-        return (
-            meters[0]
-            if meters
-            else {}
-        )
+        return meters[0] if meters else {}
 
 
 class HTFCurrentMonth(
     HTFBase,
     SensorEntity,
 ):
-    """Current month's HTF consumption."""
+    """Current month heating consumption."""
 
     _attr_name = "HTF Heating Current Month"
     _attr_unique_id = (
@@ -219,9 +219,9 @@ class HTFCurrentMonth(
     _attr_native_unit_of_measurement = (
         UnitOfEnergy.MEGA_WATT_HOUR
     )
-    _attr_icon = "mdi:fire"
-    _attr_state_class = "total"
     _attr_device_class = "energy"
+    _attr_state_class = "total"
+    _attr_icon = "mdi:fire"
 
     @property
     def native_value(self) -> float:
@@ -260,7 +260,7 @@ class HTFCurrentMonth(
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose monthly data."""
+        """Return monthly data as attributes."""
 
         return {
             "month_data": self.meter.get(
@@ -278,7 +278,7 @@ class HTFCurrentYear(
     HTFBase,
     SensorEntity,
 ):
-    """Current year's HTF consumption."""
+    """Current year heating consumption."""
 
     _attr_name = "HTF Heating Current Year"
     _attr_unique_id = (
@@ -287,9 +287,9 @@ class HTFCurrentYear(
     _attr_native_unit_of_measurement = (
         UnitOfEnergy.MEGA_WATT_HOUR
     )
-    _attr_icon = "mdi:fire"
-    _attr_state_class = "total"
     _attr_device_class = "energy"
+    _attr_state_class = "total"
+    _attr_icon = "mdi:fire"
 
     @property
     def native_value(self) -> float:
@@ -324,7 +324,7 @@ class HTFCurrentYear(
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose yearly data."""
+        """Return yearly data as attributes."""
 
         return {
             "year_data": self.meter.get(
