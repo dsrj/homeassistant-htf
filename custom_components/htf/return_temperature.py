@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -146,6 +147,30 @@ class ReturnTemperatureClient:
         response.raise_for_status()
 
     @staticmethod
+    def _describe_element(element: Any) -> str:
+        """Return a safe structural description of an HTML element."""
+        description = element.name
+
+        element_id = element.get("id")
+
+        if element_id:
+            description += f"#{element_id}"
+
+        element_class = element.get("class")
+
+        if element_class:
+            if isinstance(element_class, list):
+                classes = " ".join(element_class)
+            else:
+                classes = str(element_class)
+
+            description += (
+                f".{classes.replace(' ', '.')}"
+            )
+
+        return description
+
+    @staticmethod
     def _find_temperature_candidates(
         html: str,
     ) -> list[str]:
@@ -162,32 +187,13 @@ class ReturnTemperatureClient:
 
         for pattern in patterns:
             candidates.update(
-                re.findall(pattern, html)
+                re.findall(
+                    pattern,
+                    html,
+                )
             )
 
         return sorted(candidates)
-
-    @staticmethod
-    def _describe_element(element: Any) -> str:
-        """Return a safe structural description of an HTML element."""
-        description = element.name
-
-        element_id = element.get("id")
-        if element_id:
-            description += f"#{element_id}"
-
-        element_class = element.get("class")
-        if element_class:
-            if isinstance(element_class, list):
-                classes = " ".join(element_class)
-            else:
-                classes = str(element_class)
-
-            description += (
-                f".{classes.replace(' ', '.')}"
-            )
-
-        return description
 
     @staticmethod
     def _find_relevant_elements(
@@ -245,7 +251,7 @@ class ReturnTemperatureClient:
     def _inspect_return_temperature_section(
         html: str,
     ) -> dict[str, Any]:
-        """Inspect the dedicated return-temperature page section."""
+        """Inspect the dedicated return-temperature chart section."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -299,17 +305,13 @@ class ReturnTemperatureClient:
                     "returntemp",
                 )
             ):
-                if text:
-                    # Keep only short structural labels.
-                    cleaned = " ".join(
-                        text.split()
-                    )
+                cleaned = " ".join(
+                    text.split()
+                )
 
-                    if len(cleaned) <= 150:
-                        labels.add(cleaned)
+                if cleaned and len(cleaned) <= 150:
+                    labels.add(cleaned)
 
-        # Numeric values are collected from the dedicated section,
-        # but only values that look like temperatures are retained.
         section_text = section.get_text(
             " ",
             strip=True,
@@ -328,8 +330,6 @@ class ReturnTemperatureClient:
             except ValueError:
                 continue
 
-            # Return temperatures are normally in a human-readable
-            # Celsius range. This is only diagnostic filtering.
             if -20 <= value <= 100:
                 numeric_values.append(match)
 
@@ -347,44 +347,10 @@ class ReturnTemperatureClient:
         }
 
     @staticmethod
-    def _find_temperature_data_attributes(
+    def _inspect_canvas(
         html: str,
-    ) -> list[str]:
-        """Find data-* attributes whose names may contain temperature data."""
-        soup = BeautifulSoup(
-            html,
-            "html.parser",
-        )
-
-        results: set[str] = set()
-
-        for element in soup.find_all(True):
-            for name, value in element.attrs.items():
-                lowered = name.lower()
-
-                if (
-                    name.startswith("data-")
-                    and any(
-                        term in lowered
-                        for term in (
-                            "temp",
-                            "temperatur",
-                            "retur",
-                            "return",
-                        )
-                    )
-                ):
-                    results.add(
-                        f"{name}={value}"
-                    )
-
-        return sorted(results)[:100]
-
-    @staticmethod
-    def _find_chart_elements(
-        html: str,
-    ) -> list[str]:
-        """Find chart-related elements inside the return-temperature section."""
+    ) -> dict[str, Any]:
+        """Inspect the return-temperature chart canvas."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -395,32 +361,163 @@ class ReturnTemperatureClient:
         )
 
         if section is None:
-            return []
+            return {
+                "canvas_found": False,
+                "canvas_attributes": [],
+                "ancestors": [],
+                "siblings": [],
+            }
 
-        results: set[str] = set()
+        canvas = section.select_one(
+            "canvas.chart-canvas"
+        )
 
-        for element in section.find_all(
-            [
-                "canvas",
-                "svg",
-                "iframe",
-                "img",
-                "script",
-            ]
-        ):
-            results.add(
+        if canvas is None:
+            canvas = section.find("canvas")
+
+        if canvas is None:
+            return {
+                "canvas_found": False,
+                "canvas_attributes": [],
+                "ancestors": [],
+                "siblings": [],
+            }
+
+        attributes = []
+
+        for name, value in canvas.attrs.items():
+            attributes.append(
+                f"{name}={value}"
+            )
+
+        ancestors: list[str] = []
+
+        parent = canvas.parent
+
+        for _ in range(8):
+            if parent is None:
+                break
+
+            if not getattr(
+                parent,
+                "name",
+                None,
+            ):
+                break
+
+            ancestors.append(
                 ReturnTemperatureClient._describe_element(
-                    element
+                    parent
                 )
             )
 
-        return sorted(results)
+            parent = parent.parent
+
+        siblings: list[str] = []
+
+        if canvas.parent is not None:
+            for sibling in canvas.parent.find_all(
+                recursive=False
+            ):
+                if sibling is canvas:
+                    continue
+
+                if getattr(
+                    sibling,
+                    "name",
+                    None,
+                ):
+                    siblings.append(
+                        ReturnTemperatureClient._describe_element(
+                            sibling
+                        )
+                    )
+
+        return {
+            "canvas_found": True,
+            "canvas_attributes": sorted(attributes),
+            "ancestors": ancestors,
+            "siblings": sorted(siblings)[:50],
+        }
 
     @staticmethod
-    def _find_temperature_scripts(
+    def _find_temperature_named_elements(
         html: str,
     ) -> list[str]:
-        """Find scripts containing return-temperature configuration."""
+        """Find elements with temperature-related attributes."""
+        soup = BeautifulSoup(
+            html,
+            "html.parser",
+        )
+
+        results: set[str] = set()
+
+        terms = (
+            "temperature",
+            "temperatur",
+            "returntemp",
+            "return_temperature",
+            "returtemperatur",
+            "returtemp",
+            "return",
+            "retur",
+        )
+
+        attributes = (
+            "id",
+            "name",
+            "class",
+            "data-name",
+            "data-key",
+            "data-variable",
+            "data-field",
+            "data-chart",
+            "data-target",
+            "data-url",
+        )
+
+        for element in soup.find_all(True):
+            values: list[str] = []
+
+            for attribute_name in attributes:
+                value = element.get(
+                    attribute_name
+                )
+
+                if value is None:
+                    continue
+
+                if isinstance(value, list):
+                    values.extend(
+                        str(item)
+                        for item in value
+                    )
+                else:
+                    values.append(
+                        str(value)
+                    )
+
+            combined = " ".join(
+                values
+            ).lower()
+
+            if any(
+                term in combined
+                for term in terms
+            ):
+                results.add(
+                    ReturnTemperatureClient._describe_element(
+                        element
+                    )
+                )
+
+        return sorted(results)[:200]
+
+    @staticmethod
+    def _find_external_scripts(
+        html: str,
+    ) -> list[str]:
+        """Find external JavaScript files loaded by the page."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -429,45 +526,215 @@ class ReturnTemperatureClient:
         results: list[str] = []
 
         for script in soup.find_all("script"):
-            text = script.string or script.get_text()
+            src = script.get("src")
 
-            if not text:
+            if not src:
                 continue
 
-            lowered = text.lower()
+            absolute_url = urljoin(
+                BASE,
+                src,
+            )
 
-            if any(
-                term in lowered
-                for term in (
-                    "temperature",
-                    "temperatur",
-                    "returntemperature",
-                    "return_temperature",
-                    "returtemperatur",
-                    "returntemp",
-                    "returtemp",
-                )
-            ):
-                first_line = (
-                    text.strip()
-                    .splitlines()[0][:200]
-                    if text.strip()
-                    else ""
+            if absolute_url not in results:
+                results.append(
+                    absolute_url
                 )
 
-                if first_line:
-                    results.append(first_line)
+            if len(results) >= 100:
+                break
 
-        return results[:20]
+        return results
+
+    def _inspect_external_scripts(
+        self,
+        html: str,
+    ) -> list[str]:
+        """Search external JavaScript for return-temperature clues."""
+        script_urls = self._find_external_scripts(
+            html
+        )
+
+        findings: list[str] = []
+
+        terms = (
+            "returnTempMeters",
+            "goodReturnTemperatureData",
+            "Returtemperatur",
+            "returntemperature",
+            "returtemperatur",
+            "return_temperature",
+            "returtemp",
+            "temperature",
+            "temperatur",
+        )
+
+        for script_url in script_urls:
+            try:
+                response = self.session.get(
+                    script_url,
+                    timeout=15,
+                )
+
+                if not response.ok:
+                    continue
+
+                script_text = response.text
+
+                lowered = script_text.lower()
+
+                matched = [
+                    term
+                    for term in terms
+                    if term.lower() in lowered
+                ]
+
+                if not matched:
+                    continue
+
+                findings.append(
+                    f"SCRIPT {script_url} "
+                    f"matches={matched}"
+                )
+
+                # Find API-looking URLs and endpoint strings.
+                urls = re.findall(
+                    r"""["']((?:https?:)?//[^"']+|/[^"']*(?:api|umbraco|surface)[^"']*)["']""",
+                    script_text,
+                    flags=re.IGNORECASE,
+                )
+
+                for url in urls[:30]:
+                    findings.append(
+                        f"ENDPOINT {url}"
+                    )
+
+                # Find short contexts around the known HTF variables.
+                for term in terms:
+                    start = 0
+
+                    while True:
+                        position = lowered.find(
+                            term.lower(),
+                            start,
+                        )
+
+                        if position == -1:
+                            break
+
+                        context_start = max(
+                            0,
+                            position - 250,
+                        )
+
+                        context_end = min(
+                            len(script_text),
+                            position
+                            + len(term)
+                            + 500,
+                        )
+
+                        context = script_text[
+                            context_start:context_end
+                        ]
+
+                        context = " ".join(
+                            context.split()
+                        )
+
+                        # Avoid dumping huge script sections.
+                        findings.append(
+                            f"CONTEXT {term}: "
+                            f"{context[:800]}"
+                        )
+
+                        start = (
+                            position
+                            + len(term)
+                        )
+
+                        if len(findings) >= 100:
+                            return findings
+
+            except requests.RequestException:
+                continue
+
+        return findings[:100]
+
+    @staticmethod
+    def _find_inline_temperature_context(
+        html: str,
+    ) -> list[str]:
+        """Find short contexts around known temperature variables in the HTML."""
+        results: list[str] = []
+
+        terms = (
+            "returnTempMeters",
+            "goodReturnTemperatureData",
+            "Returtemperatur",
+            "returntemperature",
+            "returtemperatur",
+            "return_temperature",
+            "returtemp",
+        )
+
+        lowered = html.lower()
+
+        for term in terms:
+            start = 0
+
+            while True:
+                position = lowered.find(
+                    term.lower(),
+                    start,
+                )
+
+                if position == -1:
+                    break
+
+                context_start = max(
+                    0,
+                    position - 250,
+                )
+
+                context_end = min(
+                    len(html),
+                    position
+                    + len(term)
+                    + 500,
+                )
+
+                context = html[
+                    context_start:context_end
+                ]
+
+                context = " ".join(
+                    context.split()
+                )
+
+                results.append(
+                    f"{term}: {context[:800]}"
+                )
+
+                start = (
+                    position
+                    + len(term)
+                )
+
+                if len(results) >= 30:
+                    return results
+
+        return results
 
     def fetch(self) -> dict[str, Any]:
-        """Fetch and inspect the return-temperature page."""
+        """Fetch and diagnose the return-temperature chart."""
         try:
             self._login()
             self._select_consumption_point()
 
             _LOGGER.debug(
-                "HTF return temperature: requesting /forbrugsalarm/"
+                "HTF return temperature: "
+                "requesting /forbrugsalarm/"
             )
 
             response = self.session.get(
@@ -484,7 +751,8 @@ class ReturnTemperatureClient:
                 )
 
             _LOGGER.debug(
-                "HTF return temperature: page received (%s bytes)",
+                "HTF return temperature: "
+                "page received (%s bytes)",
                 len(html),
             )
 
@@ -500,26 +768,38 @@ class ReturnTemperatureClient:
                 )
             )
 
-            scripts = (
-                self._find_temperature_scripts(
-                    html
-                )
-            )
-
             section = (
                 self._inspect_return_temperature_section(
                     html
                 )
             )
 
-            data_attributes = (
-                self._find_temperature_data_attributes(
+            canvas = (
+                self._inspect_canvas(
                     html
                 )
             )
 
-            chart_elements = (
-                self._find_chart_elements(
+            named_elements = (
+                self._find_temperature_named_elements(
+                    html
+                )
+            )
+
+            external_scripts = (
+                self._find_external_scripts(
+                    html
+                )
+            )
+
+            inline_context = (
+                self._find_inline_temperature_context(
+                    html
+                )
+            )
+
+            script_findings = (
+                self._inspect_external_scripts(
                     html
                 )
             )
@@ -538,41 +818,56 @@ class ReturnTemperatureClient:
 
             _LOGGER.warning(
                 "HTF return temperature diagnostic: "
-                "temperature-related scripts=%s",
-                len(scripts),
-            )
-
-            _LOGGER.warning(
-                "HTF return temperature diagnostic: "
                 "section=%s",
                 section,
             )
 
             _LOGGER.warning(
                 "HTF return temperature diagnostic: "
-                "temperature data attributes=%s",
-                data_attributes,
+                "canvas=%s",
+                canvas,
             )
 
             _LOGGER.warning(
                 "HTF return temperature diagnostic: "
-                "chart elements=%s",
-                chart_elements,
+                "temperature-named elements=%s",
+                named_elements,
+            )
+
+            _LOGGER.warning(
+                "HTF return temperature diagnostic: "
+                "external scripts count=%s",
+                len(external_scripts),
+            )
+
+            _LOGGER.warning(
+                "HTF return temperature diagnostic: "
+                "inline temperature context=%s",
+                inline_context,
+            )
+
+            _LOGGER.warning(
+                "HTF return temperature diagnostic: "
+                "external script findings=%s",
+                script_findings,
             )
 
             return {
                 "temperature": None,
                 "diagnostic_variables": candidates,
                 "diagnostic_elements": elements,
-                "diagnostic_script_count": len(scripts),
                 "diagnostic_section": section,
-                "diagnostic_data_attributes": data_attributes,
-                "diagnostic_chart_elements": chart_elements,
+                "diagnostic_canvas": canvas,
+                "diagnostic_named_elements": named_elements,
+                "diagnostic_external_scripts": external_scripts,
+                "diagnostic_inline_context": inline_context,
+                "diagnostic_script_findings": script_findings,
             }
 
         except requests.RequestException as err:
             raise UpdateFailed(
-                f"HTF return temperature network error: {err}"
+                "HTF return temperature network error: "
+                f"{err}"
             ) from err
 
 
@@ -608,13 +903,16 @@ class ReturnTemperatureCoordinator(
             return await self.hass.async_add_executor_job(
                 self.client.fetch
             )
+
         except UpdateFailed:
             raise
+
         except Exception as err:
             _LOGGER.exception(
                 "HTF return temperature: unexpected error"
             )
 
             raise UpdateFailed(
-                f"Unable to fetch HTF return temperature: {err}"
+                "Unable to fetch HTF return temperature: "
+                f"{err}"
             ) from err
