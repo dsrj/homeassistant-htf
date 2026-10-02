@@ -26,14 +26,14 @@ from homeassistant.util import dt as dt_util
 DOMAIN = "htf"
 BASE = "https://selvbetjening.htf.dk"
 
-# Poll HTF once every 24 hours.
+# HTF is polled once every 24 hours.
 SCAN_INTERVAL = timedelta(hours=24)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _clean_number(value: Any) -> float | None:
-    """Convert a value to float."""
+    """Convert a value to a number."""
     if value is None:
         return None
 
@@ -51,7 +51,10 @@ def _clean_number(value: Any) -> float | None:
         text = text.replace(".", "")
         text = text.replace(",", ".")
 
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    match = re.search(
+        r"-?\d+(?:\.\d+)?",
+        text,
+    )
 
     if not match:
         return None
@@ -63,19 +66,21 @@ def _clean_number(value: Any) -> float | None:
 
 
 def _find_first_number(value: Any) -> float | None:
-    """Find the first numeric value recursively."""
+    """Find the first number recursively."""
     if isinstance(value, (int, float)):
         return float(value)
 
     if isinstance(value, dict):
         for item in value.values():
             result = _find_first_number(item)
+
             if result is not None:
                 return result
 
     if isinstance(value, list):
         for item in value:
             result = _find_first_number(item)
+
             if result is not None:
                 return result
 
@@ -83,14 +88,14 @@ def _find_first_number(value: Any) -> float | None:
 
 
 class HTFClient:
-    """Blocking HTF HTTP client."""
+    """Blocking HTTP client for HTF."""
 
     def __init__(
         self,
         customer: str,
         pin: str,
     ) -> None:
-        """Initialize the HTF client."""
+        """Initialize the client."""
         self.customer = customer
         self.pin = pin
         self.session = requests.Session()
@@ -107,11 +112,15 @@ class HTFClient:
 
     def _login(self) -> None:
         """Log in to HTF."""
-        login_page = self.session.get(
+        _LOGGER.debug("HTF: opening login page")
+
+        response = self.session.get(
             f"{BASE}/login",
             timeout=30,
         )
-        login_page.raise_for_status()
+        response.raise_for_status()
+
+        _LOGGER.debug("HTF: submitting login")
 
         response = self.session.post(
             f"{BASE}/umbraco/surface/login2/PostLogin",
@@ -128,6 +137,8 @@ class HTFClient:
             timeout=30,
         )
         response.raise_for_status()
+
+        _LOGGER.debug("HTF: opening dashboard")
 
         dashboard = self.session.get(
             f"{BASE}/dashboard/",
@@ -146,8 +157,16 @@ class HTFClient:
 
         self.dashboard_html = dashboard.text
 
+        _LOGGER.debug(
+            "HTF: login successful"
+        )
+
     def _select_consumption_point(self) -> None:
-        """Select the consumption point dynamically."""
+        """Select the customer's consumption point."""
+        _LOGGER.debug(
+            "HTF: finding consumption point"
+        )
+
         soup = BeautifulSoup(
             self.dashboard_html,
             "html.parser",
@@ -169,7 +188,9 @@ class HTFClient:
         )
 
         if option is None:
-            option = dropdown.find("option")
+            option = dropdown.find(
+                "option"
+            )
 
         if option is None:
             raise UpdateFailed(
@@ -201,6 +222,10 @@ class HTFClient:
         debtor_id = parts[2]
         customer_id = parts[3]
 
+        _LOGGER.debug(
+            "HTF: consumption point found"
+        )
+
         response = self.session.post(
             (
                 f"{BASE}/umbraco/surface/customer2/"
@@ -216,17 +241,17 @@ class HTFClient:
             },
             timeout=30,
         )
-
         response.raise_for_status()
 
-        # HTF has been observed to return something other
-        # than literal "OK" even when the selected
-        # consumption point works correctly.
         if response.text.strip() != "OK":
             _LOGGER.debug(
-                "HTF SetSelectedConsumption response "
-                "was %r; continuing.",
+                "HTF: SetSelectedConsumption returned "
+                "%r; continuing",
                 response.text[:200],
+            )
+        else:
+            _LOGGER.debug(
+                "HTF: consumption point selected"
             )
 
     def _get_page(
@@ -234,6 +259,11 @@ class HTFClient:
         path: str,
     ) -> str:
         """Get an authenticated HTF page."""
+        _LOGGER.debug(
+            "HTF: requesting %s",
+            path,
+        )
+
         response = self.session.get(
             f"{BASE}{path}",
             timeout=30,
@@ -247,7 +277,7 @@ class HTFClient:
         html: str,
         element_id: str,
     ) -> dict[str, Any] | None:
-        """Extract JSON from a hidden HTML element."""
+        """Extract JSON from an HTML element."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -275,7 +305,7 @@ class HTFClient:
 
         except json.JSONDecodeError:
             _LOGGER.debug(
-                "Could not decode JSON from #%s",
+                "HTF: invalid JSON in #%s",
                 element_id,
             )
 
@@ -286,7 +316,7 @@ class HTFClient:
         html: str,
         variable_name: str,
     ) -> Any:
-        """Extract a JSON-like JavaScript variable."""
+        """Extract a JavaScript variable."""
         patterns = [
             (
                 rf"\b{re.escape(variable_name)}\s*=\s*"
@@ -311,6 +341,7 @@ class HTFClient:
 
             try:
                 return json.loads(raw)
+
             except json.JSONDecodeError:
                 try:
                     converted = raw.replace(
@@ -318,11 +349,14 @@ class HTFClient:
                         '"',
                     )
 
-                    return json.loads(converted)
+                    return json.loads(
+                        converted
+                    )
 
                 except json.JSONDecodeError:
                     _LOGGER.debug(
-                        "Could not parse JS variable %s",
+                        "HTF: could not parse "
+                        "JavaScript variable %s",
                         variable_name,
                     )
 
@@ -332,7 +366,7 @@ class HTFClient:
     def _extract_return_temperature(
         html: str,
     ) -> dict[str, Any]:
-        """Extract return-temperature information."""
+        """Extract return temperature data."""
         data: dict[str, Any] = {}
 
         for name in (
@@ -353,7 +387,7 @@ class HTFClient:
     def _extract_bill_data(
         html: str,
     ) -> dict[str, Any]:
-        """Extract available account/bill information."""
+        """Extract bill information."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -361,10 +395,14 @@ class HTFClient:
 
         tables: list[list[list[str]]] = []
 
-        for table in soup.find_all("table"):
+        for table in soup.find_all(
+            "table"
+        ):
             rows: list[list[str]] = []
 
-            for row in table.find_all("tr"):
+            for row in table.find_all(
+                "tr"
+            ):
                 cells = [
                     cell.get_text(
                         " ",
@@ -447,8 +485,8 @@ class HTFClient:
                     )
 
                     if date_match:
-                        due_date = date_match.group(
-                            0
+                        due_date = (
+                            date_match.group(0)
                         )
 
         return {
@@ -460,7 +498,11 @@ class HTFClient:
         }
 
     def fetch(self) -> dict[str, Any]:
-        """Fetch all HTF data."""
+        """Fetch all HTF information."""
+        _LOGGER.debug(
+            "HTF: starting data update"
+        )
+
         self._login()
 
         self._select_consumption_point()
@@ -469,9 +511,11 @@ class HTFClient:
             "/forbrug/"
         )
 
-        consumption = self._extract_json_block(
-            consumption_html,
-            "consumption-data-json",
+        consumption = (
+            self._extract_json_block(
+                consumption_html,
+                "consumption-data-json",
+            )
         )
 
         if not consumption:
@@ -479,14 +523,24 @@ class HTFClient:
                 "HTF consumption data was not found."
             )
 
-        return_temperature_html = self._get_page(
-            "/forbrugsalarm/"
+        _LOGGER.debug(
+            "HTF: consumption data received"
+        )
+
+        return_temperature_html = (
+            self._get_page(
+                "/forbrugsalarm/"
+            )
         )
 
         return_temperature = (
             self._extract_return_temperature(
                 return_temperature_html
             )
+        )
+
+        _LOGGER.debug(
+            "HTF: return temperature page received"
         )
 
         bills_html = self._get_page(
@@ -497,9 +551,19 @@ class HTFClient:
             bills_html
         )
 
+        _LOGGER.debug(
+            "HTF: account page received"
+        )
+
+        _LOGGER.info(
+            "HTF: data update successful"
+        )
+
         return {
             "consumption": consumption,
-            "return_temperature": return_temperature,
+            "return_temperature": (
+                return_temperature
+            ),
             "bills": bills,
             "last_update": (
                 dt_util.utcnow().isoformat()
@@ -534,16 +598,45 @@ class HTFCoordinator(
     async def _async_update_data(
         self,
     ) -> dict[str, Any]:
-        """Fetch data without blocking HA."""
+        """Fetch HTF data in executor."""
         try:
             return await self.hass.async_add_executor_job(
                 self.client.fetch
             )
 
+        except UpdateFailed:
+            raise
+
         except Exception as err:
+            _LOGGER.exception(
+                "HTF: unexpected error while "
+                "fetching data"
+            )
+
             raise UpdateFailed(
                 f"Unable to fetch HTF data: {err}"
             ) from err
+
+
+async def _async_first_refresh(
+    coordinator: HTFCoordinator,
+) -> None:
+    """Run the first refresh and log failures."""
+    try:
+        _LOGGER.debug(
+            "HTF: starting first background refresh"
+        )
+
+        await coordinator.async_config_entry_first_refresh()
+
+        _LOGGER.info(
+            "HTF: first refresh completed successfully"
+        )
+
+    except Exception:
+        _LOGGER.exception(
+            "HTF: first refresh failed"
+        )
 
 
 async def async_setup_entry(
@@ -560,12 +653,14 @@ async def async_setup_entry(
 
     hass.data.setdefault(
         DOMAIN,
-        {}
+        {},
     )[entry.entry_id] = coordinator
 
     entities = [
         HTFCurrentMonth(coordinator),
-        HTFCurrentMonthDailyAverage(coordinator),
+        HTFCurrentMonthDailyAverage(
+            coordinator
+        ),
         HTFCurrentYear(coordinator),
         HTFReturnTemperature(coordinator),
         HTFBalance(coordinator),
@@ -574,14 +669,20 @@ async def async_setup_entry(
         HTFBillStatus(coordinator),
     ]
 
-    async_add_entities(entities)
+    async_add_entities(
+        entities
+    )
 
-    # Start the first update in the background.
+    # IMPORTANT:
     #
-    # This prevents the HTF website from blocking
-    # Home Assistant startup.
+    # Do not await this here because that would make
+    # Home Assistant wait for the HTF website.
+    #
+    # The first refresh happens in the background.
     hass.async_create_task(
-        coordinator.async_refresh()
+        _async_first_refresh(
+            coordinator
+        )
     )
 
 
@@ -608,8 +709,8 @@ class HTFBaseSensor(
         return DeviceInfo(
             # Stable identifier.
             #
-            # Keep this unchanged so future versions
-            # use the same Home Assistant device.
+            # This prevents future versions from creating
+            # another Home Assistant device.
             identifiers={
                 (DOMAIN, "heating")
             },
@@ -622,7 +723,7 @@ class HTFBaseSensor(
 
     @property
     def available(self) -> bool:
-        """Return whether data is available."""
+        """Return availability."""
         return (
             super().available
             and self.coordinator.data is not None
@@ -632,6 +733,9 @@ class HTFBaseSensor(
         self,
     ) -> dict[str, Any]:
         """Return consumption data."""
+        if self.coordinator.data is None:
+            return {}
+
         return self.coordinator.data.get(
             "consumption",
             {},
@@ -640,7 +744,10 @@ class HTFBaseSensor(
     def _return_temperature(
         self,
     ) -> dict[str, Any]:
-        """Return return-temperature data."""
+        """Return temperature data."""
+        if self.coordinator.data is None:
+            return {}
+
         return self.coordinator.data.get(
             "return_temperature",
             {},
@@ -650,6 +757,9 @@ class HTFBaseSensor(
         self,
     ) -> dict[str, Any]:
         """Return bill data."""
+        if self.coordinator.data is None:
+            return {}
+
         return self.coordinator.data.get(
             "bills",
             {},
@@ -659,7 +769,7 @@ class HTFBaseSensor(
 def _get_year_data(
     consumption: dict[str, Any],
 ) -> Any:
-    """Return year data."""
+    """Return yearly data."""
     return consumption.get(
         "yearData",
         [],
@@ -669,7 +779,7 @@ def _get_year_data(
 def _get_month_data(
     consumption: dict[str, Any],
 ) -> Any:
-    """Return month data."""
+    """Return monthly data."""
     return consumption.get(
         "monthData",
         [],
@@ -679,7 +789,7 @@ def _get_month_data(
 def _extract_current_month(
     consumption: dict[str, Any],
 ) -> float | None:
-    """Extract current-month consumption in MWh."""
+    """Extract current month consumption."""
     month_data = _get_month_data(
         consumption
     )
@@ -721,7 +831,7 @@ def _extract_current_month(
             if value is not None:
                 return value
 
-    # Fallback to the last numeric data point.
+    # Fallback.
     for item in reversed(
         month_data
     ):
@@ -745,7 +855,7 @@ def _extract_current_month(
 def _extract_current_year(
     consumption: dict[str, Any],
 ) -> float | None:
-    """Extract current-year consumption in MWh."""
+    """Extract current year consumption."""
     year_data = _get_year_data(
         consumption
     )
@@ -781,7 +891,7 @@ def _extract_current_year(
             if value is not None:
                 return value
 
-    # Fallback to the last numeric data point.
+    # Fallback.
     for item in reversed(
         year_data
     ):
@@ -805,7 +915,7 @@ def _extract_current_year(
 class HTFCurrentMonth(
     HTFBaseSensor
 ):
-    """Current-month heating consumption."""
+    """Current month heating consumption."""
 
     _attr_name = (
         "HTF Heating Current Month"
@@ -815,7 +925,8 @@ class HTFCurrentMonth(
     )
     _attr_device_class = "energy"
 
-    # Energy entities must use total or total_increasing.
+    # The value represents accumulated consumption
+    # for the current month.
     _attr_state_class = "total"
 
     _attr_icon = "mdi:fire"
@@ -837,7 +948,7 @@ class HTFCurrentMonth(
     def native_value(
         self,
     ) -> float | None:
-        """Return current-month consumption."""
+        """Return current month."""
         return _extract_current_month(
             self._consumption()
         )
@@ -846,7 +957,7 @@ class HTFCurrentMonth(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return historical consumption data."""
+        """Return historical data."""
         consumption = self._consumption()
 
         return {
@@ -861,6 +972,8 @@ class HTFCurrentMonth(
                 self.coordinator.data.get(
                     "last_update"
                 )
+                if self.coordinator.data
+                else None
             ),
         }
 
@@ -908,7 +1021,6 @@ class HTFCurrentMonthDailyAverage(
         if day <= 0:
             return None
 
-        # MWh -> kWh.
         return round(
             (monthly * 1000) / day,
             2,
@@ -935,7 +1047,7 @@ class HTFCurrentMonthDailyAverage(
 class HTFCurrentYear(
     HTFBaseSensor
 ):
-    """Current-year heating consumption."""
+    """Current year heating consumption."""
 
     _attr_name = (
         "HTF Heating Current Year"
@@ -945,7 +1057,8 @@ class HTFCurrentYear(
     )
     _attr_device_class = "energy"
 
-    # Energy entities must use total or total_increasing.
+    # The value represents accumulated consumption
+    # for the current year.
     _attr_state_class = "total"
 
     _attr_icon = "mdi:fire"
@@ -967,7 +1080,7 @@ class HTFCurrentYear(
     def native_value(
         self,
     ) -> float | None:
-        """Return current-year consumption."""
+        """Return current year."""
         return _extract_current_year(
             self._consumption()
         )
@@ -994,6 +1107,8 @@ class HTFCurrentYear(
                 self.coordinator.data.get(
                     "last_update"
                 )
+                if self.coordinator.data
+                else None
             ),
         }
 
@@ -1073,7 +1188,7 @@ class HTFReturnTemperature(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return historical temperature data."""
+        """Return temperature history."""
         data = self._return_temperature()
 
         return {
@@ -1118,7 +1233,7 @@ class HTFBalance(
     def native_value(
         self,
     ) -> float | None:
-        """Return account balance."""
+        """Return balance."""
         return self._bills().get(
             "balance"
         )
@@ -1127,7 +1242,7 @@ class HTFBalance(
 class HTFLatestBill(
     HTFBaseSensor
 ):
-    """Latest bill amount."""
+    """Latest bill."""
 
     _attr_name = "HTF Latest Bill"
     _attr_native_unit_of_measurement = "DKK"
@@ -1214,7 +1329,7 @@ class HTFBillStatus(
     def native_value(
         self,
     ) -> str:
-        """Return bill status."""
+        """Return account status."""
         balance = self._bills().get(
             "balance"
         )
