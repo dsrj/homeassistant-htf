@@ -34,7 +34,6 @@ class HTFClient:
     def __init__(self, customer: str, pin: str) -> None:
         self.customer = customer
         self.pin = pin
-
         self.session = requests.Session()
 
         self.session.headers.update(
@@ -53,7 +52,7 @@ class HTFClient:
         self,
         dashboard_html: str,
     ) -> dict[str, str]:
-        """Extract the selected HTF consumption point."""
+        """Extract consumption point IDs from the dashboard."""
 
         soup = BeautifulSoup(
             dashboard_html,
@@ -66,8 +65,7 @@ class HTFClient:
 
         if not dropdown:
             raise RuntimeError(
-                "HTF consumption point dropdown "
-                "was not found on the dashboard."
+                "HTF consumption point dropdown was not found."
             )
 
         option = dropdown.select_one(
@@ -79,8 +77,7 @@ class HTFClient:
 
         if not option:
             raise RuntimeError(
-                "HTF consumption point option "
-                "was not found."
+                "HTF consumption point option was not found."
             )
 
         value = option.get("value")
@@ -94,8 +91,7 @@ class HTFClient:
 
         if len(parts) != 4:
             raise RuntimeError(
-                "Unexpected HTF consumption point format: "
-                f"{len(parts)} values received."
+                "Unexpected HTF consumption point format."
             )
 
         consumption_point_id = parts[0]
@@ -103,8 +99,11 @@ class HTFClient:
         debtor_id = parts[2]
         customer_id = parts[3]
 
+        # Do NOT log these values.
+        # They are account-specific information.
         _LOGGER.debug(
-            "HTF consumption point found."
+            "HTF consumption point information "
+            "was extracted from the dashboard."
         )
 
         return {
@@ -118,16 +117,16 @@ class HTFClient:
         self,
         dashboard_html: str,
     ) -> None:
-        """Select the HTF consumption point."""
+        """Select the consumption point for this session."""
 
-        ids = self._get_consumption_point(
+        consumption_data = self._get_consumption_point(
             dashboard_html
         )
 
         response = self.session.post(
             f"{BASE}/umbraco/surface/customer2/"
             "SetSelectedConsumption",
-            data=ids,
+            data=consumption_data,
             headers={
                 "Referer": f"{BASE}/dashboard/",
                 "Origin": BASE,
@@ -141,17 +140,17 @@ class HTFClient:
 
         response.raise_for_status()
 
+        result = response.text.strip()
+
         _LOGGER.debug(
-            "HTF SetSelectedConsumption completed: "
-            "status=%s response=%s",
+            "HTF consumption point selection completed: "
+            "status=%s",
             response.status_code,
-            response.text[:100],
         )
 
-        if response.text.strip() != "OK":
+        if result != "OK":
             raise RuntimeError(
-                "HTF rejected the consumption point "
-                "selection."
+                "HTF rejected the consumption point selection."
             )
 
     def fetch(self) -> dict[str, Any]:
@@ -177,7 +176,7 @@ class HTFClient:
         )
 
         # ---------------------------------------------------------
-        # 2. Login.
+        # 2. Log in.
         # ---------------------------------------------------------
 
         login = self.session.post(
@@ -208,6 +207,12 @@ class HTFClient:
 
         # ---------------------------------------------------------
         # 3. Open dashboard.
+        #
+        # The dashboard contains the selected installation:
+        #
+        # <option value="...;...;...;..." selected>
+        #
+        # We extract those values dynamically.
         # ---------------------------------------------------------
 
         dashboard = self.session.get(
@@ -234,7 +239,7 @@ class HTFClient:
         )
 
         # ---------------------------------------------------------
-        # 5. Fetch consumption page.
+        # 5. Open consumption page.
         # ---------------------------------------------------------
 
         page = self.session.get(
@@ -253,7 +258,7 @@ class HTFClient:
         )
 
         # ---------------------------------------------------------
-        # 6. Extract consumption JSON.
+        # 6. Find embedded consumption JSON.
         # ---------------------------------------------------------
 
         soup = BeautifulSoup(
@@ -280,6 +285,10 @@ class HTFClient:
                 "HTF returned empty consumption data."
             )
 
+        # ---------------------------------------------------------
+        # 7. Parse JSON.
+        # ---------------------------------------------------------
+
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as err:
@@ -289,9 +298,12 @@ class HTFClient:
 
         if not isinstance(data, dict):
             raise RuntimeError(
-                "HTF returned an unexpected "
-                "consumption format."
+                "HTF returned an unexpected consumption format."
             )
+
+        # ---------------------------------------------------------
+        # 8. Validate meter data.
+        # ---------------------------------------------------------
 
         meters = data.get("meters")
 
@@ -334,12 +346,15 @@ async def async_setup_entry(
         update_interval=SCAN_INTERVAL,
     )
 
+    # Initial update.
+    #
+    # We deliberately do not make integration setup fail
+    # if HTF is temporarily unavailable.
     try:
         await coordinator.async_refresh()
     except Exception as err:
         _LOGGER.error(
-            "Unexpected error fetching HTF "
-            "consumption data: %s",
+            "Unexpected error fetching HTF consumption data: %s",
             err,
         )
 
