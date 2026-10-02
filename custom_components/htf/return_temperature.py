@@ -22,6 +22,7 @@ BASE = "https://selvbetjening.htf.dk"
 SCAN_INTERVAL = timedelta(hours=24)
 
 COUNTER_M3 = 2
+COUNTER_FLOW_TEMPERATURE = 4
 COUNTER_RETURN_TEMPERATURE = 5
 
 
@@ -36,7 +37,6 @@ class ReturnTemperatureClient:
         """Initialize."""
         self.customer = customer
         self.pin = pin
-
         self.session = requests.Session()
 
         self.session.headers.update(
@@ -90,7 +90,7 @@ class ReturnTemperatureClient:
         self.dashboard_html = response.text
 
     def _select_consumption_point(self) -> None:
-        """Select the same consumption point as the main integration."""
+        """Select the HTF consumption point."""
         soup = BeautifulSoup(
             self.dashboard_html,
             "html.parser",
@@ -149,10 +149,10 @@ class ReturnTemperatureClient:
         response.raise_for_status()
 
     @staticmethod
-    def _get_consumption_json(
+    def _get_return_temperature_json(
         html: str,
     ) -> dict[str, Any]:
-        """Extract HTF consumption JSON."""
+        """Extract JSON from the HTF return-temperature page."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -164,7 +164,7 @@ class ReturnTemperatureClient:
 
         if element is None:
             raise UpdateFailed(
-                "HTF consumption data JSON not found"
+                "HTF return-temperature JSON not found"
             )
 
         raw = element.get_text(
@@ -173,72 +173,40 @@ class ReturnTemperatureClient:
 
         if not raw:
             raise UpdateFailed(
-                "HTF consumption data JSON is empty"
+                "HTF return-temperature JSON is empty"
             )
 
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as err:
             raise UpdateFailed(
-                "HTF consumption data JSON is invalid"
+                "HTF return-temperature JSON is invalid"
             ) from err
 
         if not isinstance(data, dict):
             raise UpdateFailed(
-                "HTF consumption data has unexpected format"
+                "HTF return-temperature data has unexpected format"
             )
 
         return data
 
     @staticmethod
-    def _collect_all_meters(
-        data: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """Collect meters from all known HTF JSON locations."""
-        meters: list[dict[str, Any]] = []
+    def _find_meter(
+        meters: list[dict[str, Any]],
+        counter_number: int,
+        meter_type2: str,
+    ) -> dict[str, Any] | None:
+        """Find a return-temperature meter."""
+        for meter in meters:
+            info = meter.get("meterInfo")
 
-        for key in (
-            "meters",
-            "returnTempMeters",
-        ):
-            value = data.get(key)
-
-            if not isinstance(
-                value,
-                list,
-            ):
+            if not isinstance(info, dict):
                 continue
 
-            for meter in value:
-                if not isinstance(
-                    meter,
-                    dict,
-                ):
-                    continue
+            actual_counter = info.get(
+                "counterNumber"
+            )
 
-                if meter not in meters:
-                    meters.append(meter)
-
-        return meters
-
-    @staticmethod
-    def _meter_matches(
-        meter: dict[str, Any],
-        counter_number: int,
-        meter_type2: str | None = None,
-    ) -> bool:
-        """Check whether a meter matches the requested type."""
-        info = meter.get(
-            "meterInfo"
-        )
-
-        if not isinstance(
-            info,
-            dict,
-        ):
-            return False
-
-        if meter_type2:
             actual_type = str(
                 info.get(
                     "meterType2",
@@ -246,33 +214,20 @@ class ReturnTemperatureClient:
                 )
             ).upper()
 
-            if actual_type == meter_type2.upper():
-                return True
+            try:
+                counter_matches = (
+                    int(actual_counter)
+                    == counter_number
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                counter_matches = False
 
-        value = info.get(
-            "counterNumber"
-        )
-
-        try:
-            return int(value) == counter_number
-        except (
-            TypeError,
-            ValueError,
-        ):
-            return False
-
-    @staticmethod
-    def _find_meter(
-        meters: list[dict[str, Any]],
-        counter_number: int,
-        meter_type2: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Find a meter."""
-        for meter in meters:
-            if ReturnTemperatureClient._meter_matches(
-                meter,
-                counter_number,
-                meter_type2,
+            if (
+                counter_matches
+                and actual_type == meter_type2.upper()
             ):
                 return meter
 
@@ -364,32 +319,29 @@ class ReturnTemperatureClient:
     def _calculate_temperature(
         data: dict[str, Any],
     ) -> tuple[float, str]:
-        """Calculate return temperature exactly like HTF JavaScript."""
-        meters = (
-            ReturnTemperatureClient._collect_all_meters(
-                data
-            )
+        """Calculate return temperature from HTF return-temperature data."""
+        meters = data.get(
+            "returnTempMeters"
         )
 
-        if not meters:
+        if not isinstance(
+            meters,
+            list,
+        ):
             raise UpdateFailed(
-                "HTF contains no meter data"
+                "HTF return-temperature meters not found"
             )
 
-        return_meter = (
-            ReturnTemperatureClient._find_meter(
-                meters,
-                COUNTER_RETURN_TEMPERATURE,
-                "FV-RT",
-            )
+        return_meter = ReturnTemperatureClient._find_meter(
+            meters,
+            COUNTER_RETURN_TEMPERATURE,
+            "FV-RT",
         )
 
-        volume_meter = (
-            ReturnTemperatureClient._find_meter(
-                meters,
-                COUNTER_M3,
-                "FV-M3",
-            )
+        m3_meter = ReturnTemperatureClient._find_meter(
+            meters,
+            COUNTER_M3,
+            "FV-M3",
         )
 
         if return_meter is None:
@@ -398,7 +350,7 @@ class ReturnTemperatureClient:
                 "(FV-RT / counterNumber 5) not found"
             )
 
-        if volume_meter is None:
+        if m3_meter is None:
             raise UpdateFailed(
                 "HTF M3 meter "
                 "(FV-M3 / counterNumber 2) not found"
@@ -410,26 +362,15 @@ class ReturnTemperatureClient:
             )
         )
 
-        volume_values = (
+        m3_values = (
             ReturnTemperatureClient._build_month_values(
-                volume_meter
+                m3_meter
             )
         )
 
-        if not return_values:
-            raise UpdateFailed(
-                "HTF return-temperature meter "
-                "contains no monthly values"
-            )
-
-        if not volume_values:
-            raise UpdateFailed(
-                "HTF M3 meter contains no monthly values"
-            )
-
         common_dates = sorted(
             set(return_values)
-            & set(volume_values)
+            & set(m3_values)
         )
 
         if not common_dates:
@@ -438,57 +379,38 @@ class ReturnTemperatureClient:
                 "meters have no common dates"
             )
 
-        # KEEP THIS CALCULATION.
-        #
-        # This is the calculation from the earlier
-        # working version that produced the correct
-        # HTF value, including 30.00 °C.
-        #
-        # HTF CoolingController.js:
-        #
-        # completeLineChartValues =
-        #     dataRT.map((rt, i) => rt / dataM3[i])
-        #
-        for date_key in reversed(
-            common_dates
-        ):
-            return_value = return_values[
-                date_key
-            ]
+        latest_date = common_dates[-1]
 
-            volume_value = volume_values[
-                date_key
-            ]
+        return_value = return_values[
+            latest_date
+        ]
 
-            if volume_value == 0:
-                continue
+        m3_value = m3_values[
+            latest_date
+        ]
 
-            temperature = (
-                return_value / volume_value
+        if m3_value == 0:
+            raise UpdateFailed(
+                "HTF M3 value is zero"
             )
 
-            return (
-                round(
-                    temperature,
-                    2,
-                ),
-                date_key,
-            )
+        temperature = (
+            return_value / m3_value
+        )
 
-        raise UpdateFailed(
-            "HTF return-temperature calculation "
-            "failed because M3 values are zero"
+        return (
+            round(
+                temperature,
+                2,
+            ),
+            latest_date,
         )
 
     @staticmethod
     def _get_good_return_temperature_data(
-        html: str,
+        data: dict[str, Any],
     ) -> dict[str, float]:
-        """Extract HTF yearly good-return-temperature targets."""
-        data = ReturnTemperatureClient._get_consumption_json(
-            html
-        )
-
+        """Extract yearly HTF return-temperature targets."""
         values = data.get(
             "goodReturnTemperatureData"
         )
@@ -513,22 +435,18 @@ class ReturnTemperatureClient:
         return result
 
     def fetch(self) -> dict[str, Any]:
-        """Fetch HTF return temperature."""
+        """Fetch return temperature from /returtemperatur/."""
         try:
             self._login()
             self._select_consumption_point()
 
-            # IMPORTANT:
-            # Return temperature continues to come from
-            # /forbrug/ using the working FV-RT / FV-M3
-            # calculation above.
             response = self.session.get(
-                f"{BASE}/forbrug/",
+                f"{BASE}/returtemperatur/",
                 timeout=30,
             )
             response.raise_for_status()
 
-            data = self._get_consumption_json(
+            data = self._get_return_temperature_json(
                 response.text
             )
 
@@ -538,18 +456,9 @@ class ReturnTemperatureClient:
                 )
             )
 
-            # Fetch HTF's own yearly target separately.
-            # This does not change the return-temperature
-            # calculation.
-            target_response = self.session.get(
-                f"{BASE}/returtemperatur/",
-                timeout=30,
-            )
-            target_response.raise_for_status()
-
             targets = (
                 self._get_good_return_temperature_data(
-                    target_response.text
+                    data
                 )
             )
 
@@ -558,8 +467,7 @@ class ReturnTemperatureClient:
             )
 
             _LOGGER.info(
-                "HTF return temperature: "
-                "%.2f °C for %s",
+                "HTF return temperature: %.2f °C for %s",
                 temperature,
                 date_key,
             )
@@ -587,9 +495,7 @@ class ReturnTemperatureClient:
 
 
 class ReturnTemperatureCoordinator(
-    DataUpdateCoordinator[
-        dict[str, Any]
-    ]
+    DataUpdateCoordinator[dict[str, Any]]
 ):
     """Coordinate HTF return-temperature updates."""
 
