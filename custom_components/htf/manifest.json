@@ -1,9 +1,10 @@
 {
   "domain": "htf",
   "name": "HTF Selvbetjening",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "documentation": "https://selvbetjening.htf.dk",
   "requirements": ["beautifulsoup4"],
   "config_flow": true,
+  "iot_class": "cloud_polling",
   "codeowners": []
 }
