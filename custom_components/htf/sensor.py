@@ -728,8 +728,6 @@ class HTFClient:
             bills,
         )
 
-        # Return temperature is fetched separately so that
-        # the already-working consumption/billing path stays isolated.
         return_temperature = (
             ReturnTemperatureClient(
                 self.customer,
@@ -1158,7 +1156,7 @@ class HTFReturnTemperature(
                 "good_return_temperature_data"
             ),
             "calculation": (
-                "HTF /forbrug/: FV-RT / FV-M3"
+                "HTF /returtemperatur/: FV-RT / FV-M3"
             ),
         }
 
