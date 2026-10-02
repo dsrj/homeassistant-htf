@@ -1,7 +1,7 @@
 {
   "domain": "htf",
   "name": "HTF Selvbetjening",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "documentation": "https://selvbetjening.htf.dk",
   "requirements": [
     "beautifulsoup4"
