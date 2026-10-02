@@ -52,7 +52,7 @@ class HTFClient:
         self,
         dashboard_html: str,
     ) -> dict[str, str]:
-        """Extract consumption point IDs from the dashboard."""
+        """Extract consumption point information dynamically."""
 
         soup = BeautifulSoup(
             dashboard_html,
@@ -87,17 +87,25 @@ class HTFClient:
                 "HTF consumption point value is empty."
             )
 
-        parts = value.split(";")
+        parts = [
+            part.strip()
+            for part in value.split(";")
+        ]
 
         if len(parts) != 4:
             raise RuntimeError(
                 "Unexpected HTF consumption point format."
             )
 
-        _LOGGER.debug(
-            "HTF consumption point information "
-            "was extracted from dashboard."
-        )
+        # The HTF website uses:
+        #
+        # ConsumptionPointId;
+        # ConsumerId;
+        # DebtorId;
+        # CustomerId
+        #
+        # The actual values are obtained dynamically from
+        # the authenticated user's dashboard.
 
         return {
             "ConsumptionPointId": parts[0],
@@ -109,17 +117,19 @@ class HTFClient:
     def _select_consumption_point(
         self,
         dashboard_html: str,
-    ) -> str:
-        """Try to select the consumption point."""
+    ) -> None:
+        """Tell HTF which consumption point is selected."""
 
-        consumption_data = self._get_consumption_point(
-            dashboard_html
+        consumption_point = (
+            self._get_consumption_point(
+                dashboard_html
+            )
         )
 
         response = self.session.post(
             f"{BASE}/umbraco/surface/customer2/"
             "SetSelectedConsumption",
-            data=consumption_data,
+            data=consumption_point,
             headers={
                 "Referer": f"{BASE}/dashboard/",
                 "Origin": BASE,
@@ -136,22 +146,29 @@ class HTFClient:
         result = response.text.strip()
 
         _LOGGER.debug(
-            "HTF SetSelectedConsumption response: "
-            "status=%s length=%s",
+            "HTF SetSelectedConsumption returned "
+            "HTTP %s.",
             response.status_code,
-            len(result),
         )
 
-        return result
+        # HTF's JavaScript normally expects "OK", but we do
+        # NOT make this response mandatory. The dashboard may
+        # already have the correct consumption point selected.
+        if result != "OK":
+            _LOGGER.debug(
+                "HTF did not return OK from "
+                "SetSelectedConsumption. "
+                "Continuing with the existing session."
+            )
 
-    def _get_consumption(
+    def _extract_consumption(
         self,
-        page_html: str,
+        html: str,
     ) -> dict[str, Any]:
-        """Extract consumption JSON from the page."""
+        """Extract consumption data from /forbrug/."""
 
         soup = BeautifulSoup(
-            page_html,
+            html,
             "html.parser",
         )
 
@@ -161,7 +178,8 @@ class HTFClient:
 
         if not node:
             raise RuntimeError(
-                "HTF consumption data was not found."
+                "HTF consumption data was not found "
+                "on the /forbrug/ page."
             )
 
         raw = node.get_text(
@@ -182,12 +200,11 @@ class HTFClient:
 
         if not isinstance(data, dict):
             raise RuntimeError(
-                "HTF returned an unexpected consumption format."
+                "HTF returned an unexpected "
+                "consumption data format."
             )
 
-        meters = data.get("meters")
-
-        if not meters:
+        if not data.get("meters"):
             raise RuntimeError(
                 "HTF returned no heating meters."
             )
@@ -195,7 +212,7 @@ class HTFClient:
         return data
 
     def fetch(self) -> dict[str, Any]:
-        """Log in and retrieve HTF consumption data."""
+        """Log in and retrieve consumption data."""
 
         # ---------------------------------------------------------
         # 1. Open login page.
@@ -212,12 +229,11 @@ class HTFClient:
         login_page.raise_for_status()
 
         _LOGGER.debug(
-            "HTF login page loaded: status=%s",
-            login_page.status_code,
+            "HTF login page loaded."
         )
 
         # ---------------------------------------------------------
-        # 2. Log in.
+        # 2. Login.
         # ---------------------------------------------------------
 
         login = self.session.post(
@@ -247,7 +263,7 @@ class HTFClient:
         )
 
         # ---------------------------------------------------------
-        # 3. Open dashboard.
+        # 3. Load dashboard.
         # ---------------------------------------------------------
 
         dashboard = self.session.get(
@@ -261,45 +277,28 @@ class HTFClient:
         dashboard.raise_for_status()
 
         _LOGGER.debug(
-            "HTF dashboard loaded: status=%s",
-            dashboard.status_code,
+            "HTF dashboard loaded."
         )
 
         # ---------------------------------------------------------
-        # 4. Try to select the consumption point.
-        #
-        # HTF's own page only calls this when the user changes
-        # the dropdown. Therefore failure here should not
-        # automatically prevent us from reading /forbrug/.
+        # 4. Dynamically select consumption point.
         # ---------------------------------------------------------
 
         try:
-            selection_result = (
-                self._select_consumption_point(
-                    dashboard.text
-                )
+            self._select_consumption_point(
+                dashboard.text
             )
-
-            if selection_result == "OK":
-                _LOGGER.debug(
-                    "HTF consumption point selection succeeded."
-                )
-            else:
-                _LOGGER.debug(
-                    "HTF consumption point selection "
-                    "returned a non-OK response; "
-                    "continuing to /forbrug/."
-                )
-
         except Exception as err:
-            _LOGGER.debug(
-                "HTF consumption point selection failed; "
-                "continuing to /forbrug/: %s",
+            # Do not immediately abort. The dashboard can already
+            # have the correct consumption point selected.
+            _LOGGER.warning(
+                "HTF consumption point selection "
+                "could not be completed: %s",
                 err,
             )
 
         # ---------------------------------------------------------
-        # 5. Fetch consumption page.
+        # 5. Load consumption page.
         # ---------------------------------------------------------
 
         page = self.session.get(
@@ -313,31 +312,16 @@ class HTFClient:
         page.raise_for_status()
 
         _LOGGER.debug(
-            "HTF consumption page loaded: status=%s",
-            page.status_code,
+            "HTF consumption page loaded."
         )
 
         # ---------------------------------------------------------
         # 6. Extract consumption JSON.
         # ---------------------------------------------------------
 
-        try:
-            data = self._get_consumption(
-                page.text
-            )
-        except RuntimeError as err:
-            raise RuntimeError(
-                "HTF login succeeded, but the consumption "
-                "data could not be read from /forbrug/. "
-                "The HTF session may require a different "
-                "consumption-point selection step."
-            ) from err
-
-        _LOGGER.debug(
-            "HTF consumption data received successfully."
+        return self._extract_consumption(
+            page.text
         )
-
-        return data
 
 
 async def async_setup_entry(
@@ -353,7 +337,7 @@ async def async_setup_entry(
     )
 
     async def update() -> dict[str, Any]:
-        """Fetch data from HTF."""
+        """Fetch HTF data."""
 
         return await hass.async_add_executor_job(
             client.fetch
@@ -371,7 +355,8 @@ async def async_setup_entry(
         await coordinator.async_refresh()
     except Exception as err:
         _LOGGER.error(
-            "Unexpected error fetching HTF consumption data: %s",
+            "Unexpected error fetching HTF "
+            "consumption data: %s",
             err,
         )
 
@@ -384,7 +369,7 @@ async def async_setup_entry(
 
 
 class HTFBase(CoordinatorEntity):
-    """Base class for HTF sensors."""
+    """Base HTF sensor."""
 
     _attr_device_info = DeviceInfo(
         identifiers={(DOMAIN, "heating")},
@@ -395,7 +380,7 @@ class HTFBase(CoordinatorEntity):
 
     @property
     def meter(self) -> dict[str, Any]:
-        """Return the first HTF meter."""
+        """Return the first heating meter."""
 
         meters = (
             self.coordinator.data or {}
@@ -430,7 +415,7 @@ class HTFCurrentMonth(
 
         now = dt_util.now()
 
-        data = (
+        year_data = (
             self.meter
             .get("monthData", {})
             .get(
@@ -439,12 +424,12 @@ class HTFCurrentMonth(
             )
         )
 
-        months = data.get(
+        months = year_data.get(
             "monthNumbers",
             [],
         )
 
-        values = data.get(
+        values = year_data.get(
             "values",
             [],
         )
@@ -509,17 +494,17 @@ class HTFCurrentYear(
 
         now = dt_util.now()
 
-        data = self.meter.get(
+        year_data = self.meter.get(
             "yearData",
             {},
         )
 
-        years = data.get(
+        years = year_data.get(
             "yearNumbers",
             [],
         )
 
-        values = data.get(
+        values = year_data.get(
             "values",
             [],
         )
