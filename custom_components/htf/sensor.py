@@ -48,8 +48,26 @@ class HTFClient:
         )
 
     def fetch(self) -> dict[str, Any]:
-        """Log in and retrieve consumption data."""
+        """Log in to HTF and retrieve consumption data."""
 
+        # Step 1: Open the login page first.
+        # This allows HTF to create the ASP.NET session.
+        login_page = self.session.get(
+            f"{BASE}/login",
+            headers={
+                "Referer": BASE,
+            },
+            timeout=30,
+        )
+        login_page.raise_for_status()
+
+        _LOGGER.debug(
+            "HTF login page: status=%s cookies=%s",
+            login_page.status_code,
+            list(self.session.cookies.keys()),
+        )
+
+        # Step 2: Submit the HTF login form.
         login = self.session.post(
             f"{BASE}/umbraco/surface/login2/PostLogin",
             data={
@@ -59,20 +77,24 @@ class HTFClient:
             headers={
                 "Referer": f"{BASE}/login",
                 "Origin": BASE,
+                "Content-Type": (
+                    "application/x-www-form-urlencoded; "
+                    "charset=UTF-8"
+                ),
             },
             timeout=30,
             allow_redirects=True,
         )
-
         login.raise_for_status()
 
         _LOGGER.debug(
-            "HTF login response: status=%s url=%s",
+            "HTF login result: status=%s url=%s cookies=%s",
             login.status_code,
             login.url,
+            list(self.session.cookies.keys()),
         )
 
-        # Now request the actual consumption page.
+        # Step 3: Request the consumption page.
         page = self.session.get(
             f"{BASE}/forbrug/",
             headers={
@@ -80,9 +102,15 @@ class HTFClient:
             },
             timeout=30,
         )
-
         page.raise_for_status()
 
+        _LOGGER.debug(
+            "HTF consumption page: status=%s url=%s",
+            page.status_code,
+            page.url,
+        )
+
+        # Step 4: Extract the JSON embedded in the page.
         soup = BeautifulSoup(
             page.text,
             "html.parser",
@@ -93,16 +121,16 @@ class HTFClient:
         )
 
         if not node:
+            # Don't log the page because it could contain
+            # personal customer information.
             raise RuntimeError(
-                "HTF login/session did not provide "
-                "#consumption-data-json. "
-                "The HTF credentials may be incorrect "
-                "or the portal session could not be created."
+                "HTF login/session succeeded but "
+                "#consumption-data-json was not found "
+                "on /forbrug/. Check the HTF login response "
+                "and session handling."
             )
 
-        raw = node.get_text(
-            strip=True
-        )
+        raw = node.get_text(strip=True)
 
         if not raw:
             raise RuntimeError(
@@ -166,6 +194,7 @@ class HTFBase(CoordinatorEntity):
     @property
     def meter(self) -> dict[str, Any]:
         """Return the first HTF meter."""
+
         meters = (
             self.coordinator.data or {}
         ).get("meters", [])
@@ -197,6 +226,7 @@ class HTFCurrentMonth(
     @property
     def native_value(self) -> float:
         """Return current month consumption."""
+
         now = dt_util.now()
 
         data = (
@@ -230,7 +260,8 @@ class HTFCurrentMonth(
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose all monthly data."""
+        """Expose monthly data."""
+
         return {
             "month_data": self.meter.get(
                 "monthData",
@@ -263,6 +294,7 @@ class HTFCurrentYear(
     @property
     def native_value(self) -> float:
         """Return current year consumption."""
+
         now = dt_util.now()
 
         data = self.meter.get(
@@ -293,6 +325,7 @@ class HTFCurrentYear(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose yearly data."""
+
         return {
             "year_data": self.meter.get(
                 "yearData",
