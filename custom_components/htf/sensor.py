@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import timedelta
 from typing import Any
 
@@ -50,150 +49,85 @@ class HTFClient:
             }
         )
 
-    def _find_value(
-        self,
-        text: str,
-        names: list[str],
-    ) -> str | None:
-        """Find a value in HTML/JavaScript."""
-
-        for name in names:
-            patterns = [
-                rf'"{re.escape(name)}"\s*:\s*"([^"]+)"',
-                rf"'{re.escape(name)}'\s*:\s*'([^']+)'",
-                rf'"{re.escape(name)}"\s*:\s*(\d+)',
-                rf"'{re.escape(name)}'\s*:\s*(\d+)",
-                rf"\b{re.escape(name)}\b\s*:\s*['\"]([^'\"]+)['\"]",
-                rf"\b{re.escape(name)}\b\s*:\s*(\d+)",
-            ]
-
-            for pattern in patterns:
-                match = re.search(
-                    pattern,
-                    text,
-                    re.IGNORECASE,
-                )
-
-                if match:
-                    return match.group(1)
-
-        return None
-
-    def _find_consumption_point(
+    def _get_consumption_point(
         self,
         dashboard_html: str,
     ) -> dict[str, str]:
-        """Extract HTF consumption selection IDs."""
+        """Extract the selected HTF consumption point."""
 
-        result: dict[str, str] = {}
-
-        consumption_point_id = self._find_value(
+        soup = BeautifulSoup(
             dashboard_html,
-            [
-                "consumptionPointId",
-                "ConsumptionPointId",
-                "consumptionpointid",
-            ],
+            "html.parser",
         )
 
-        consumer_id = self._find_value(
-            dashboard_html,
-            [
-                "consumerId",
-                "ConsumerId",
-                "consumerid",
-            ],
+        dropdown = soup.select_one(
+            ".subheader-consumptionpoint-dropdown"
         )
 
-        debtor_id = self._find_value(
-            dashboard_html,
-            [
-                "debitorId",
-                "DebtorId",
-                "debtorId",
-                "debitorid",
-            ],
+        if not dropdown:
+            raise RuntimeError(
+                "HTF consumption point dropdown "
+                "was not found on the dashboard."
+            )
+
+        option = dropdown.select_one(
+            "option[selected]"
         )
 
-        customer_id = self._find_value(
-            dashboard_html,
-            [
-                "customerId",
-                "CustomerId",
-                "customerid",
-            ],
+        if not option:
+            option = dropdown.select_one("option")
+
+        if not option:
+            raise RuntimeError(
+                "HTF consumption point option "
+                "was not found."
+            )
+
+        value = option.get("value")
+
+        if not value:
+            raise RuntimeError(
+                "HTF consumption point value is empty."
+            )
+
+        parts = value.split(";")
+
+        if len(parts) != 4:
+            raise RuntimeError(
+                "Unexpected HTF consumption point format: "
+                f"{len(parts)} values received."
+            )
+
+        consumption_point_id = parts[0]
+        consumer_id = parts[1]
+        debtor_id = parts[2]
+        customer_id = parts[3]
+
+        _LOGGER.debug(
+            "HTF consumption point found."
         )
 
-        if consumption_point_id:
-            result["ConsumptionPointId"] = consumption_point_id
-
-        if consumer_id:
-            result["ConsumerId"] = consumer_id
-
-        if debtor_id:
-            result["DebtorId"] = debtor_id
-
-        if customer_id:
-            result["CustomerId"] = customer_id
-
-        return result
+        return {
+            "ConsumptionPointId": consumption_point_id,
+            "ConsumerId": consumer_id,
+            "DebtorId": debtor_id,
+            "CustomerId": customer_id,
+        }
 
     def _select_consumption_point(
         self,
         dashboard_html: str,
     ) -> None:
-        """Select the user's consumption point."""
+        """Select the HTF consumption point."""
 
-        ids = self._find_consumption_point(
+        ids = self._get_consumption_point(
             dashboard_html
         )
-
-        _LOGGER.debug(
-            "HTF consumption selection IDs found: %s",
-            {
-                key: value
-                for key, value in ids.items()
-                if key != "CustomerId"
-            },
-        )
-
-        required = [
-            "ConsumptionPointId",
-            "ConsumerId",
-            "DebtorId",
-            "CustomerId",
-        ]
-
-        missing = [
-            key
-            for key in required
-            if not ids.get(key)
-        ]
-
-        if missing:
-            raise RuntimeError(
-                "HTF consumption point IDs could not "
-                "be found on the dashboard. Missing: "
-                + ", ".join(missing)
-            )
 
         response = self.session.post(
             f"{BASE}/umbraco/surface/customer2/"
             "SetSelectedConsumption",
-            data={
-                "ConsumptionPointId": ids[
-                    "ConsumptionPointId"
-                ],
-                "ConsumerId": ids[
-                    "ConsumerId"
-                ],
-                "DebtorId": ids[
-                    "DebtorId"
-                ],
-                "CustomerId": ids[
-                    "CustomerId"
-                ],
-            },
+            data=ids,
             headers={
                 "Referer": f"{BASE}/dashboard/",
                 "Origin": BASE,
@@ -209,14 +143,15 @@ class HTFClient:
 
         _LOGGER.debug(
             "HTF SetSelectedConsumption completed: "
-            "status=%s",
+            "status=%s response=%s",
             response.status_code,
+            response.text[:100],
         )
 
-        if response.text:
-            _LOGGER.debug(
-                "HTF SetSelectedConsumption response: %s",
-                response.text[:500],
+        if response.text.strip() != "OK":
+            raise RuntimeError(
+                "HTF rejected the consumption point "
+                "selection."
             )
 
     def fetch(self) -> dict[str, Any]:
@@ -242,7 +177,7 @@ class HTFClient:
         )
 
         # ---------------------------------------------------------
-        # 2. Submit login.
+        # 2. Login.
         # ---------------------------------------------------------
 
         login = self.session.post(
@@ -273,9 +208,6 @@ class HTFClient:
 
         # ---------------------------------------------------------
         # 3. Open dashboard.
-        #
-        # HTF normally establishes/selects the consumption point
-        # through the dashboard before /forbrug/ is opened.
         # ---------------------------------------------------------
 
         dashboard = self.session.get(
@@ -289,13 +221,12 @@ class HTFClient:
         dashboard.raise_for_status()
 
         _LOGGER.debug(
-            "HTF dashboard loaded: status=%s url=%s",
+            "HTF dashboard loaded: status=%s",
             dashboard.status_code,
-            dashboard.url,
         )
 
         # ---------------------------------------------------------
-        # 4. Select the consumption point.
+        # 4. Select consumption point.
         # ---------------------------------------------------------
 
         self._select_consumption_point(
@@ -317,13 +248,12 @@ class HTFClient:
         page.raise_for_status()
 
         _LOGGER.debug(
-            "HTF consumption page loaded: status=%s url=%s",
+            "HTF consumption page loaded: status=%s",
             page.status_code,
-            page.url,
         )
 
         # ---------------------------------------------------------
-        # 6. Extract embedded consumption JSON.
+        # 6. Extract consumption JSON.
         # ---------------------------------------------------------
 
         soup = BeautifulSoup(
@@ -357,13 +287,10 @@ class HTFClient:
                 "HTF returned invalid consumption JSON."
             ) from err
 
-        # ---------------------------------------------------------
-        # 7. Basic validation.
-        # ---------------------------------------------------------
-
         if not isinstance(data, dict):
             raise RuntimeError(
-                "HTF returned an unexpected consumption format."
+                "HTF returned an unexpected "
+                "consumption format."
             )
 
         meters = data.get("meters")
@@ -394,6 +321,7 @@ async def async_setup_entry(
 
     async def update() -> dict[str, Any]:
         """Fetch data from HTF."""
+
         return await hass.async_add_executor_job(
             client.fetch
         )
@@ -406,16 +334,12 @@ async def async_setup_entry(
         update_interval=SCAN_INTERVAL,
     )
 
-    # First refresh.
-    #
-    # Do not fail integration setup if HTF is temporarily
-    # unavailable. The entities will remain available and
-    # the coordinator will retry during the next update.
     try:
         await coordinator.async_refresh()
     except Exception as err:
         _LOGGER.error(
-            "Unexpected error fetching HTF consumption data: %s",
+            "Unexpected error fetching HTF "
+            "consumption data: %s",
             err,
         )
 
@@ -465,9 +389,7 @@ class HTFCurrentMonth(
     )
 
     _attr_device_class = "energy"
-
     _attr_state_class = "total"
-
     _attr_icon = "mdi:fire"
 
     @property
@@ -515,7 +437,7 @@ class HTFCurrentMonth(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return monthly data as attributes."""
+        """Return monthly data."""
 
         return {
             "month_data": self.meter.get(
@@ -546,9 +468,7 @@ class HTFCurrentYear(
     )
 
     _attr_device_class = "energy"
-
     _attr_state_class = "total"
-
     _attr_icon = "mdi:fire"
 
     @property
@@ -592,7 +512,7 @@ class HTFCurrentYear(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return yearly data as attributes."""
+        """Return yearly data."""
 
         return {
             "year_data": self.meter.get(
