@@ -23,6 +23,8 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.util import dt as dt_util
 
+from .return_temperature import ReturnTemperatureCoordinator
+
 DOMAIN = "htf"
 BASE = "https://selvbetjening.htf.dk"
 SCAN_INTERVAL = timedelta(hours=24)
@@ -230,8 +232,9 @@ class HTFClient:
                 "pinkode": self.pin,
             },
             headers={
-                "Content-Type":
+                "Content-Type": (
                     "application/x-www-form-urlencoded; charset=UTF-8"
+                )
             },
             timeout=30,
         )
@@ -382,61 +385,6 @@ class HTFClient:
         )
 
     @staticmethod
-    def _js_variable(
-        html: str,
-        name: str,
-    ) -> Any:
-        """Extract a JavaScript variable."""
-        patterns = (
-            rf"\b{re.escape(name)}\s*=\s*(\[[\s\S]*?\])\s*;",
-            rf"\b{re.escape(name)}\s*=\s*(\{{[\s\S]*?\}})\s*;",
-        )
-
-        for pattern in patterns:
-            match = re.search(
-                pattern,
-                html,
-            )
-
-            if not match:
-                continue
-
-            raw = match.group(1)
-
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                try:
-                    return json.loads(
-                        raw.replace("'", '"')
-                    )
-                except json.JSONDecodeError:
-                    pass
-
-        return None
-
-    def _return_temperature(
-        self,
-        html: str,
-    ) -> dict[str, Any]:
-        """Extract return temperature data."""
-        result: dict[str, Any] = {}
-
-        for name in (
-            "returnTemperatureData",
-            "goodReturnTemperatureData",
-        ):
-            value = self._js_variable(
-                html,
-                name,
-            )
-
-            if value is not None:
-                result[name] = value
-
-        return result
-
-    @staticmethod
     def _bills(html: str) -> dict[str, Any]:
         """Extract account statement."""
         soup = BeautifulSoup(
@@ -525,7 +473,7 @@ class HTFClient:
         }
 
     def fetch(self) -> dict[str, Any]:
-        """Fetch HTF data."""
+        """Fetch HTF consumption and billing data."""
         _LOGGER.debug(
             "HTF: starting data update"
         )
@@ -533,6 +481,9 @@ class HTFClient:
         self._login()
         self._select_consumption_point()
 
+        # IMPORTANT:
+        # The main client only handles consumption and bills.
+        # Return temperature is handled by return_temperature.py.
         consumption_html = self._page(
             "/forbrug/"
         )
@@ -561,7 +512,7 @@ class HTFClient:
             "HTF: consumption data received"
         )
 
-        # Diagnostic information from the real HTF response.
+        # Keep the existing consumption diagnostics.
         _log_json(
             "monthData",
             _get_month_data(
@@ -593,40 +544,7 @@ class HTFClient:
             _current_year(consumption),
         )
 
-        return_html = self._page(
-            "/forbrugsalarm/"
-        )
-
-        return_temperature = (
-            self._return_temperature(
-                return_html
-            )
-        )
-
-        _log_json(
-            "return-temperature",
-            return_temperature,
-        )
-
-        # Find possible variable names on the return-temperature page.
-        names = sorted(
-            set(
-                re.findall(
-                    r"\b([A-Za-z_$][\w$]*"
-                    r"(?:temperature|Temperature|temp|Temp|"
-                    r"return|Return)"
-                    r"[A-Za-z0-9_$]*)\b",
-                    return_html,
-                )
-            )
-        )
-
-        _LOGGER.warning(
-            "HTF DIAGNOSTIC: possible return-temperature "
-            "variable names=%s",
-            names,
-        )
-
+        # Bills/account information.
         bills_html = self._page(
             "/kundeoplysninger/kontoudtog/"
         )
@@ -646,7 +564,6 @@ class HTFClient:
 
         return {
             "consumption": consumption,
-            "return_temperature": return_temperature,
             "bills": bills,
             "last_update": (
                 dt_util.utcnow().isoformat()
@@ -657,7 +574,7 @@ class HTFClient:
 class HTFCoordinator(
     DataUpdateCoordinator[dict[str, Any]]
 ):
-    """Coordinate HTF updates."""
+    """Coordinate HTF consumption and billing updates."""
 
     def __init__(
         self,
@@ -718,6 +635,26 @@ async def _first_refresh(
         )
 
 
+async def _return_temperature_first_refresh(
+    coordinator: ReturnTemperatureCoordinator,
+) -> None:
+    """Perform return-temperature refresh in background."""
+    try:
+        _LOGGER.debug(
+            "HTF: starting return-temperature background refresh"
+        )
+
+        await coordinator.async_config_entry_first_refresh()
+
+        _LOGGER.info(
+            "HTF: return-temperature first refresh completed"
+        )
+    except Exception:
+        _LOGGER.exception(
+            "HTF: return-temperature first refresh failed"
+        )
+
+
 class HTFBaseSensor(
     CoordinatorEntity[HTFCoordinator],
     SensorEntity,
@@ -767,18 +704,6 @@ class HTFBaseSensor(
 
         return self.coordinator.data.get(
             "consumption",
-            {},
-        )
-
-    def temperature(
-        self,
-    ) -> dict[str, Any]:
-        """Return temperature."""
-        if self.coordinator.data is None:
-            return {}
-
-        return self.coordinator.data.get(
-            "return_temperature",
             {},
         )
 
@@ -942,10 +867,12 @@ class HTFCurrentYear(
 
 
 class HTFReturnTemperature(
-    HTFBaseSensor
+    CoordinatorEntity[ReturnTemperatureCoordinator],
+    SensorEntity,
 ):
     """Return temperature."""
 
+    _attr_has_entity_name = False
     _attr_name = "HTF Return Temperature"
     _attr_native_unit_of_measurement = "°C"
     _attr_device_class = "temperature"
@@ -954,7 +881,7 @@ class HTFReturnTemperature(
 
     def __init__(
         self,
-        coordinator: HTFCoordinator,
+        coordinator: ReturnTemperatureCoordinator,
     ) -> None:
         """Initialize."""
         super().__init__(coordinator)
@@ -963,40 +890,63 @@ class HTFReturnTemperature(
         )
 
     @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        return DeviceInfo(
+            identifiers={
+                (
+                    DOMAIN,
+                    "heating",
+                )
+            },
+            name="HTF Heating",
+            manufacturer="Høje Taastrup Fjernvarme",
+            configuration_url=BASE,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return availability."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+        )
+
+    @property
     def native_value(self) -> float | None:
-        """Return latest temperature."""
-        data = self.temperature()
+        """Return latest return temperature."""
+        if not self.coordinator.data:
+            return None
 
-        for key in (
-            "goodReturnTemperatureData",
-            "returnTemperatureData",
-        ):
-            value = data.get(key)
+        value = self.coordinator.data.get(
+            "temperature"
+        )
 
-            if isinstance(value, list) and value:
-                number = _find_number(value[-1])
-
-                if number is not None:
-                    return round(
-                        number,
-                        2,
-                    )
+        if isinstance(value, (int, float)):
+            return round(
+                float(value),
+                2,
+            )
 
         return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return temperature history."""
-        data = self.temperature()
+        """Return diagnostic information."""
+        data = self.coordinator.data or {}
 
         return {
-            "good_return_temperature": data.get(
-                "goodReturnTemperatureData",
+            "diagnostic_variables": data.get(
+                "diagnostic_variables",
                 [],
             ),
-            "return_temperature_history": data.get(
-                "returnTemperatureData",
+            "diagnostic_elements": data.get(
+                "diagnostic_elements",
                 [],
+            ),
+            "diagnostic_script_count": data.get(
+                "diagnostic_script_count",
+                0,
             ),
         }
 
@@ -1128,17 +1078,32 @@ async def async_setup_entry(
         entry.data["pin"],
     )
 
+    return_temperature_coordinator = (
+        ReturnTemperatureCoordinator(
+            hass,
+            entry.data["customer"],
+            entry.data["pin"],
+        )
+    )
+
     hass.data.setdefault(
         DOMAIN,
         {}
-    )[entry.entry_id] = coordinator
+    )[entry.entry_id] = {
+        "coordinator": coordinator,
+        "return_temperature_coordinator": (
+            return_temperature_coordinator
+        ),
+    }
 
     async_add_entities(
         [
             HTFCurrentMonth(coordinator),
             HTFDailyAverage(coordinator),
             HTFCurrentYear(coordinator),
-            HTFReturnTemperature(coordinator),
+            HTFReturnTemperature(
+                return_temperature_coordinator
+            ),
             HTFBalance(coordinator),
             HTFLatestBill(coordinator),
             HTFLatestBillDueDate(coordinator),
@@ -1148,4 +1113,10 @@ async def async_setup_entry(
 
     hass.async_create_task(
         _first_refresh(coordinator)
+    )
+
+    hass.async_create_task(
+        _return_temperature_first_refresh(
+            return_temperature_coordinator
+        )
     )
