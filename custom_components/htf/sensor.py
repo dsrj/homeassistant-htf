@@ -85,20 +85,25 @@ def _find_first_number(value: Any) -> float | None:
 class HTFClient:
     """Blocking HTF HTTP client."""
 
-    def __init__(self, customer: str, pin: str) -> None:
+    def __init__(
+        self,
+        customer: str,
+        pin: str,
+    ) -> None:
+        """Initialize the HTF client."""
         self.customer = customer
         self.pin = pin
         self.session = requests.Session()
+        self.dashboard_html = ""
 
         self.session.headers.update(
             {
                 "User-Agent": (
-                    "Mozilla/5.0 (Home Assistant HTF integration)"
+                    "Mozilla/5.0 "
+                    "(Home Assistant HTF integration)"
                 ),
             }
         )
-
-        self.dashboard_html = ""
 
     def _login(self) -> None:
         """Log in to HTF."""
@@ -116,7 +121,8 @@ class HTFClient:
             },
             headers={
                 "Content-Type": (
-                    "application/x-www-form-urlencoded; charset=UTF-8"
+                    "application/x-www-form-urlencoded; "
+                    "charset=UTF-8"
                 ),
             },
             timeout=30,
@@ -130,7 +136,8 @@ class HTFClient:
         dashboard.raise_for_status()
 
         if (
-            "subheader-consumptionpoint-dropdown" not in dashboard.text
+            "subheader-consumptionpoint-dropdown"
+            not in dashboard.text
             and "/login" in dashboard.url.lower()
         ):
             raise UpdateFailed(
@@ -152,24 +159,30 @@ class HTFClient:
 
         if dropdown is None:
             raise UpdateFailed(
-                "HTF consumption point dropdown was not found."
+                "HTF consumption point dropdown "
+                "was not found."
             )
 
-        option = dropdown.find("option", selected=True)
+        option = dropdown.find(
+            "option",
+            selected=True,
+        )
 
         if option is None:
             option = dropdown.find("option")
 
         if option is None:
             raise UpdateFailed(
-                "HTF consumption point option was not found."
+                "HTF consumption point option "
+                "was not found."
             )
 
         value = option.get("value")
 
         if not value:
             raise UpdateFailed(
-                "HTF consumption point value was empty."
+                "HTF consumption point value "
+                "was empty."
             )
 
         parts = [
@@ -194,7 +207,9 @@ class HTFClient:
                 "SetSelectedConsumption"
             ),
             data={
-                "ConsumptionPointId": consumption_point_id,
+                "ConsumptionPointId": (
+                    consumption_point_id
+                ),
                 "ConsumerId": consumer_id,
                 "DebtorId": debtor_id,
                 "CustomerId": customer_id,
@@ -204,23 +219,27 @@ class HTFClient:
 
         response.raise_for_status()
 
-        # HTF has been observed to return something other than
-        # literal "OK" even when the selected consumption point
-        # works correctly.
+        # HTF has been observed to return something other
+        # than literal "OK" even when the selected
+        # consumption point works correctly.
         if response.text.strip() != "OK":
             _LOGGER.debug(
-                "HTF SetSelectedConsumption response was %r; "
-                "continuing.",
+                "HTF SetSelectedConsumption response "
+                "was %r; continuing.",
                 response.text[:200],
             )
 
-    def _get_page(self, path: str) -> str:
+    def _get_page(
+        self,
+        path: str,
+    ) -> str:
         """Get an authenticated HTF page."""
         response = self.session.get(
             f"{BASE}{path}",
             timeout=30,
         )
         response.raise_for_status()
+
         return response.text
 
     @staticmethod
@@ -298,7 +317,9 @@ class HTFClient:
                         "'",
                         '"',
                     )
+
                     return json.loads(converted)
+
                 except json.JSONDecodeError:
                     _LOGGER.debug(
                         "Could not parse JS variable %s",
@@ -384,7 +405,9 @@ class HTFClient:
                     )
                 ):
                     for cell in reversed(row):
-                        number = _clean_number(cell)
+                        number = _clean_number(
+                            cell
+                        )
 
                         if number is not None:
                             balance = number
@@ -399,7 +422,9 @@ class HTFClient:
                     )
                 ):
                     for cell in reversed(row):
-                        number = _clean_number(cell)
+                        number = _clean_number(
+                            cell
+                        )
 
                         if number is not None:
                             latest_bill = number
@@ -413,12 +438,18 @@ class HTFClient:
                     )
                 ):
                     date_match = re.search(
-                        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",
+                        (
+                            r"\b\d{1,2}"
+                            r"[./-]\d{1,2}"
+                            r"[./-]\d{2,4}\b"
+                        ),
                         " ".join(row),
                     )
 
                     if date_match:
-                        due_date = date_match.group(0)
+                        due_date = date_match.group(
+                            0
+                        )
 
         return {
             "balance": balance,
@@ -487,6 +518,7 @@ class HTFCoordinator(
         customer: str,
         pin: str,
     ) -> None:
+        """Initialize coordinator."""
         self.client = HTFClient(
             customer,
             pin,
@@ -502,7 +534,7 @@ class HTFCoordinator(
     async def _async_update_data(
         self,
     ) -> dict[str, Any]:
-        """Fetch data without blocking Home Assistant."""
+        """Fetch data without blocking HA."""
         try:
             return await self.hass.async_add_executor_job(
                 self.client.fetch
@@ -528,7 +560,7 @@ async def async_setup_entry(
 
     hass.data.setdefault(
         DOMAIN,
-        {},
+        {}
     )[entry.entry_id] = coordinator
 
     entities = [
@@ -542,12 +574,12 @@ async def async_setup_entry(
         HTFBillStatus(coordinator),
     ]
 
-    async_add_entities(
-        entities
-    )
+    async_add_entities(entities)
 
-    # Run the first update in the background.
-    # This prevents HTF's website from blocking HA startup.
+    # Start the first update in the background.
+    #
+    # This prevents the HTF website from blocking
+    # Home Assistant startup.
     hass.async_create_task(
         coordinator.async_refresh()
     )
@@ -565,6 +597,7 @@ class HTFBaseSensor(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -575,8 +608,8 @@ class HTFBaseSensor(
         return DeviceInfo(
             # Stable identifier.
             #
-            # Keep this unchanged so future versions of the
-            # integration continue using the same HA device.
+            # Keep this unchanged so future versions
+            # use the same Home Assistant device.
             identifiers={
                 (DOMAIN, "heating")
             },
@@ -688,7 +721,7 @@ def _extract_current_month(
             if value is not None:
                 return value
 
-    # Fallback: last numeric data point.
+    # Fallback to the last numeric data point.
     for item in reversed(
         month_data
     ):
@@ -717,51 +750,54 @@ def _extract_current_year(
         consumption
     )
 
-    if isinstance(
+    if not isinstance(
         year_data,
         list,
     ):
-        now = dt_util.now()
+        return None
 
-        for item in year_data:
-            if not isinstance(
-                item,
-                dict,
-            ):
-                continue
+    now = dt_util.now()
 
-            text = json.dumps(
-                item,
-                ensure_ascii=False,
-            ).lower()
-
-            if str(now.year) in text:
-                value = _find_first_number(
-                    item.get("value")
-                    or item.get("consumption")
-                    or item.get("amount")
-                    or item.get("mwh")
-                )
-
-                if value is not None:
-                    return value
-
-        for item in reversed(
-            year_data
+    for item in year_data:
+        if not isinstance(
+            item,
+            dict,
         ):
-            if isinstance(
-                item,
-                dict,
-            ):
-                value = _find_first_number(
-                    item.get("value")
-                    or item.get("consumption")
-                    or item.get("amount")
-                    or item.get("mwh")
-                )
+            continue
 
-                if value is not None:
-                    return value
+        text = json.dumps(
+            item,
+            ensure_ascii=False,
+        ).lower()
+
+        if str(now.year) in text:
+            value = _find_first_number(
+                item.get("value")
+                or item.get("consumption")
+                or item.get("amount")
+                or item.get("mwh")
+            )
+
+            if value is not None:
+                return value
+
+    # Fallback to the last numeric data point.
+    for item in reversed(
+        year_data
+    ):
+        if isinstance(
+            item,
+            dict,
+        ):
+            value = _find_first_number(
+                item.get("value")
+                or item.get("consumption")
+                or item.get("amount")
+                or item.get("mwh")
+            )
+
+            if value is not None:
+                return value
 
     return None
 
@@ -778,13 +814,17 @@ class HTFCurrentMonth(
         UnitOfEnergy.MEGA_WATT_HOUR
     )
     _attr_device_class = "energy"
-    _attr_state_class = "measurement"
+
+    # Energy entities must use total or total_increasing.
+    _attr_state_class = "total"
+
     _attr_icon = "mdi:fire"
 
     def __init__(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -842,6 +882,7 @@ class HTFCurrentMonthDailyAverage(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -867,6 +908,7 @@ class HTFCurrentMonthDailyAverage(
         if day <= 0:
             return None
 
+        # MWh -> kWh.
         return round(
             (monthly * 1000) / day,
             2,
@@ -902,13 +944,17 @@ class HTFCurrentYear(
         UnitOfEnergy.MEGA_WATT_HOUR
     )
     _attr_device_class = "energy"
-    _attr_state_class = "measurement"
+
+    # Energy entities must use total or total_increasing.
+    _attr_state_class = "total"
+
     _attr_icon = "mdi:fire"
 
     def __init__(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -960,9 +1006,7 @@ class HTFReturnTemperature(
     _attr_name = (
         "HTF Return Temperature"
     )
-    _attr_native_unit_of_measurement = (
-        "°C"
-    )
+    _attr_native_unit_of_measurement = "°C"
     _attr_device_class = "temperature"
     _attr_state_class = "measurement"
     _attr_icon = "mdi:thermometer"
@@ -971,6 +1015,7 @@ class HTFReturnTemperature(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -1053,15 +1098,14 @@ class HTFBalance(
     """Account balance."""
 
     _attr_name = "HTF Balance"
-    _attr_native_unit_of_measurement = (
-        "DKK"
-    )
+    _attr_native_unit_of_measurement = "DKK"
     _attr_icon = "mdi:bank"
 
     def __init__(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -1086,15 +1130,14 @@ class HTFLatestBill(
     """Latest bill amount."""
 
     _attr_name = "HTF Latest Bill"
-    _attr_native_unit_of_measurement = (
-        "DKK"
-    )
+    _attr_native_unit_of_measurement = "DKK"
     _attr_icon = "mdi:receipt"
 
     def __init__(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -1127,6 +1170,7 @@ class HTFLatestBillDueDate(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
@@ -1157,6 +1201,7 @@ class HTFBillStatus(
         self,
         coordinator: HTFCoordinator,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(
             coordinator
         )
