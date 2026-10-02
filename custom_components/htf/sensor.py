@@ -43,7 +43,6 @@ SCAN_INTERVAL = timedelta(hours=24)
 
 
 def _number(value: Any) -> float | None:
-    """Convert a value to float."""
     if value is None or isinstance(value, bool):
         return None
 
@@ -53,6 +52,7 @@ def _number(value: Any) -> float | None:
     if isinstance(value, str):
         text = value.strip().replace(",", ".")
         match = re.search(r"-?\d+(?:\.\d+)?", text)
+
         if match:
             try:
                 return float(match.group(0))
@@ -66,10 +66,8 @@ def _get_meter(consumption: dict[str, Any]) -> dict[str, Any]:
     meters = consumption.get("meters")
 
     if isinstance(meters, list) and meters:
-        first = meters[0]
-
-        if isinstance(first, dict):
-            return first
+        if isinstance(meters[0], dict):
+            return meters[0]
 
     return {}
 
@@ -101,9 +99,7 @@ def _get_year_data(consumption: dict[str, Any]) -> dict[str, Any]:
 
 
 def _current_month(consumption: dict[str, Any]) -> float | None:
-    """Return current calendar month's heating consumption in MWh."""
     data = _get_month_data(consumption)
-
     now = dt_util.now()
 
     year_data = data.get(f"year_{now.year}")
@@ -126,15 +122,16 @@ def _current_month(consumption: dict[str, Any]) -> float | None:
 
 
 def _current_year(consumption: dict[str, Any]) -> float | None:
-    """Return current calendar year's heating consumption in MWh."""
     data = _get_year_data(consumption)
-
     now = dt_util.now()
 
     years = data.get("yearNumbers")
     values = data.get("values")
 
-    if not isinstance(years, list) or not isinstance(values, list):
+    if not isinstance(years, list):
+        return None
+
+    if not isinstance(values, list):
         return None
 
     for index, year in enumerate(years):
@@ -148,7 +145,6 @@ def _find_number(
     obj: Any,
     wanted_keys: set[str],
 ) -> float | None:
-    """Recursively find a numeric value belonging to wanted keys."""
     if isinstance(obj, dict):
         for key, value in obj.items():
             normalized = re.sub(
@@ -164,14 +160,20 @@ def _find_number(
                     return number
 
         for value in obj.values():
-            found = _find_number(value, wanted_keys)
+            found = _find_number(
+                value,
+                wanted_keys,
+            )
 
             if found is not None:
                 return found
 
     elif isinstance(obj, list):
         for value in obj:
-            found = _find_number(value, wanted_keys)
+            found = _find_number(
+                value,
+                wanted_keys,
+            )
 
             if found is not None:
                 return found
@@ -180,17 +182,16 @@ def _find_number(
 
 
 def _extract_json_objects(text: str) -> list[Any]:
-    """Extract possible JSON objects from script text."""
     results: list[Any] = []
 
     for match in re.finditer(
         r"(?s)(\{.*?\}|\[.*?\])",
         text,
     ):
-        candidate = match.group(1)
-
         try:
-            results.append(json.loads(candidate))
+            results.append(
+                json.loads(match.group(1))
+            )
         except (json.JSONDecodeError, TypeError):
             continue
 
@@ -200,13 +201,16 @@ def _extract_json_objects(text: str) -> list[Any]:
 def _extract_return_temperature(
     html: str,
 ) -> float | None:
-    """Try several patterns to find return temperature."""
+    """Try several possible HTF return-temperature formats."""
     if not html:
         return None
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
 
-    key_names = {
+    wanted_keys = {
         "returntemperature",
         "returtemperatur",
         "returtemperaturc",
@@ -218,38 +222,37 @@ def _extract_return_temperature(
         "returtemp",
         "returtempvalue",
         "returtempc",
-        "returtemperature",
     }
 
-    # ---------------------------------------------------------
-    # 1. Search HTML data attributes.
-    # ---------------------------------------------------------
-
+    # HTML attributes.
     for element in soup.find_all(True):
         for attr, value in element.attrs.items():
-            attr_normalized = re.sub(
+            normalized = re.sub(
                 r"[^a-z0-9]",
                 "",
                 str(attr).lower(),
             )
 
             if (
-                attr_normalized in key_names
-                or "returtemperatur" in attr_normalized
-                or "returntemperature" in attr_normalized
-                or "returntemp" in attr_normalized
+                normalized in wanted_keys
+                or "returtemperatur" in normalized
+                or "returntemperature" in normalized
+                or "returntemp" in normalized
             ):
                 number = _number(value)
 
-                if number is not None and -50 <= number <= 150:
+                if (
+                    number is not None
+                    and -50 <= number <= 150
+                ):
                     return number
 
-    # ---------------------------------------------------------
-    # 2. Search JavaScript.
-    # ---------------------------------------------------------
-
+    # JavaScript.
     for script in soup.find_all("script"):
-        script_text = script.string or script.get_text()
+        script_text = (
+            script.string
+            or script.get_text()
+        )
 
         if not script_text:
             continue
@@ -257,13 +260,15 @@ def _extract_return_temperature(
         patterns = [
             (
                 r"(?i)"
-                r"(?:returnTemperature|returnTemp|returTemperatur|returTemp)"
+                r"(?:returnTemperature|returnTemp|"
+                r"returTemperatur|returTemp)"
                 r"\s*[:=]\s*[\"']?"
                 r"(-?\d+(?:[.,]\d+)?)"
             ),
             (
                 r"(?i)"
-                r"(?:return_temperature|return_temperature_value|"
+                r"(?:return_temperature|"
+                r"return_temperature_value|"
                 r"retur_temperatur)"
                 r"\s*[:=]\s*[\"']?"
                 r"(-?\d+(?:[.,]\d+)?)"
@@ -280,34 +285,47 @@ def _extract_return_temperature(
         ]
 
         for pattern in patterns:
-            match = re.search(pattern, script_text)
-
-            if match:
-                number = _number(match.group(1))
-
-                if number is not None and -50 <= number <= 150:
-                    return number
-
-        # Try JSON fragments inside scripts.
-        for obj in _extract_json_objects(script_text):
-            found = _find_number(
-                obj,
-                key_names,
+            match = re.search(
+                pattern,
+                script_text,
             )
 
-            if found is not None and -50 <= found <= 150:
+            if match:
+                number = _number(
+                    match.group(1)
+                )
+
+                if (
+                    number is not None
+                    and -50 <= number <= 150
+                ):
+                    return number
+
+        for obj in _extract_json_objects(
+            script_text
+        ):
+            found = _find_number(
+                obj,
+                wanted_keys,
+            )
+
+            if (
+                found is not None
+                and -50 <= found <= 150
+            ):
                 return found
 
-    # ---------------------------------------------------------
-    # 3. Search visible page text.
-    # ---------------------------------------------------------
+    # Visible page text.
+    text = soup.get_text(
+        " ",
+        strip=True,
+    )
 
-    text = soup.get_text(" ", strip=True)
-
-    text_patterns = [
+    patterns = [
         (
             r"(?i)"
-            r"(?:returtemperatur|return\s+temperature|"
+            r"(?:returtemperatur|"
+            r"return\s+temperature|"
             r"returntemperatur)"
             r"\s*[:\-]?\s*"
             r"(-?\d+(?:[.,]\d+)?)"
@@ -322,37 +340,21 @@ def _extract_return_temperature(
         ),
     ]
 
-    for pattern in text_patterns:
-        match = re.search(pattern, text)
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+        )
 
         if match:
-            number = _number(match.group(1))
+            number = _number(
+                match.group(1)
+            )
 
-            if number is not None and -50 <= number <= 150:
-                return number
-
-    # ---------------------------------------------------------
-    # 4. Search raw HTML near return-temperature identifiers.
-    # ---------------------------------------------------------
-
-    source_patterns = [
-        (
-            r"(?is)"
-            r"(?:returtemperatur|returntemperature|"
-            r"returtemp|returntemp)"
-            r".{0,250}?"
-            r"(-?\d+(?:[.,]\d+)?)"
-            r"\s*(?:°\s*C|degC|celsius)?"
-        ),
-    ]
-
-    for pattern in source_patterns:
-        match = re.search(pattern, html)
-
-        if match:
-            number = _number(match.group(1))
-
-            if number is not None and -50 <= number <= 150:
+            if (
+                number is not None
+                and -50 <= number <= 150
+            ):
                 return number
 
     return None
@@ -361,7 +363,6 @@ def _extract_return_temperature(
 def _parse_danish_amount(
     value: str,
 ) -> float | None:
-    """Parse Danish amount such as 2.686,03."""
     if not value:
         return None
 
@@ -388,8 +389,9 @@ def _parse_danish_amount(
         return None
 
 
-def _parse_bills(html: str) -> dict[str, Any]:
-    """Parse account statement data."""
+def _parse_bills(
+    html: str,
+) -> dict[str, Any]:
     soup = BeautifulSoup(
         html,
         "html.parser",
@@ -401,7 +403,10 @@ def _parse_bills(html: str) -> dict[str, Any]:
         rows: list[dict[str, str]] = []
 
         headers = [
-            cell.get_text(" ", strip=True)
+            cell.get_text(
+                " ",
+                strip=True,
+            )
             for cell in table.find_all("th")
         ]
 
@@ -410,7 +415,10 @@ def _parse_bills(html: str) -> dict[str, Any]:
 
             if first_row:
                 headers = [
-                    cell.get_text(" ", strip=True)
+                    cell.get_text(
+                        " ",
+                        strip=True,
+                    )
                     for cell in first_row.find_all(
                         ["th", "td"]
                     )
@@ -418,16 +426,27 @@ def _parse_bills(html: str) -> dict[str, Any]:
 
         for row in table.find_all("tr"):
             cells = [
-                cell.get_text(" ", strip=True)
+                cell.get_text(
+                    " ",
+                    strip=True,
+                )
                 for cell in row.find_all("td")
             ]
 
             if not cells:
                 continue
 
-            if headers and len(headers) == len(cells):
+            if (
+                headers
+                and len(headers) == len(cells)
+            ):
                 rows.append(
-                    dict(zip(headers, cells))
+                    dict(
+                        zip(
+                            headers,
+                            cells,
+                        )
+                    )
                 )
 
         if rows:
@@ -442,20 +461,20 @@ def _parse_bills(html: str) -> dict[str, Any]:
             description = ""
 
             for key, value in row.items():
-                key_normalized = re.sub(
+                normalized = re.sub(
                     r"[^a-z0-9]",
                     "",
                     key.lower(),
                 )
 
-                if key_normalized in {
+                if normalized in {
                     "beløb",
                     "beloeb",
                     "amount",
                 }:
                     amount_text = value
 
-                if key_normalized in {
+                if normalized in {
                     "beskrivelse",
                     "description",
                 }:
@@ -468,17 +487,16 @@ def _parse_bills(html: str) -> dict[str, Any]:
             if amount is not None:
                 amounts.append(amount)
 
-            if description:
-                description_normalized = (
-                    description.lower()
-                )
+            description_normalized = (
+                description.lower()
+            )
 
-                if (
-                    "aconto" in description_normalized
-                    or "opgørelse" in description_normalized
-                    or "opgorelse" in description_normalized
-                ):
-                    bill_rows.append(row)
+            if (
+                "aconto" in description_normalized
+                or "opgørelse" in description_normalized
+                or "opgorelse" in description_normalized
+            ):
+                bill_rows.append(row)
 
     balance = (
         round(sum(amounts), 2)
@@ -493,22 +511,22 @@ def _parse_bills(html: str) -> dict[str, Any]:
         latest = bill_rows[0]
 
         for key, value in latest.items():
-            key_normalized = re.sub(
+            normalized = re.sub(
                 r"[^a-z0-9]",
                 "",
                 key.lower(),
             )
 
-            if key_normalized in {
+            if normalized in {
                 "beløb",
                 "beloeb",
                 "amount",
             }:
-                latest_bill = _parse_danish_amount(
-                    value
+                latest_bill = (
+                    _parse_danish_amount(value)
                 )
 
-            elif key_normalized in {
+            elif normalized in {
                 "forfaldsdato",
                 "duedate",
             }:
@@ -525,33 +543,65 @@ def _find_json_block(
     soup: BeautifulSoup,
     element_id: str,
 ) -> dict[str, Any]:
-    """Read JSON from a hidden HTML element."""
-    element = soup.find(id=element_id)
-
-    if element is None:
-        return {}
-
-    raw = element.get_text(
-        strip=True
+    """Find JSON embedded by HTF."""
+    element = soup.find(
+        id=element_id
     )
 
-    if not raw:
-        return {}
+    if element is not None:
+        raw = element.get_text(
+            strip=True
+        )
 
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
+        if raw:
+            try:
+                value = json.loads(raw)
 
-    return (
-        value
-        if isinstance(value, dict)
-        else {}
+                if isinstance(value, dict):
+                    return value
+
+            except json.JSONDecodeError:
+                pass
+
+    # Fallback if HTF changes the surrounding HTML.
+    html = str(soup)
+
+    pattern = (
+        r'(?is)<[^>]*\bid=["\']'
+        + re.escape(element_id)
+        + r'["\'][^>]*>'
+        r'(.*?)'
+        r'</[^>]+>'
     )
+
+    match = re.search(
+        pattern,
+        html,
+    )
+
+    if match:
+        raw = BeautifulSoup(
+            match.group(1),
+            "html.parser",
+        ).get_text(
+            strip=True
+        )
+
+        if raw:
+            try:
+                value = json.loads(raw)
+
+                if isinstance(value, dict):
+                    return value
+
+            except json.JSONDecodeError:
+                pass
+
+    return {}
 
 
 class HTFClient:
-    """Synchronous client for HTF portal."""
+    """HTF portal client."""
 
     def __init__(
         self,
@@ -633,7 +683,9 @@ class HTFClient:
             "HTF: login successful"
         )
 
-    def select_consumption_point(self) -> None:
+    def select_consumption_point(
+        self,
+    ) -> None:
         _LOGGER.debug(
             "HTF: opening dashboard"
         )
@@ -709,7 +761,50 @@ class HTFClient:
             "consumption-data-json",
         )
 
+        # Additional fallback for HTF HTML changes.
         if not data:
+            marker = re.search(
+                r'(?is)'
+                r'id=["\']consumption-data-json["\']'
+                r'.*?'
+                r'(\{.*?"meters"\s*:\s*\[.*?\].*?\})'
+                r'\s*</',
+                response.text,
+            )
+
+            if marker:
+                try:
+                    candidate = json.loads(
+                        marker.group(1)
+                    )
+
+                    if isinstance(
+                        candidate,
+                        dict,
+                    ):
+                        data = candidate
+
+                except json.JSONDecodeError:
+                    pass
+
+        if not data:
+            title = (
+                soup.title.get_text(
+                    " ",
+                    strip=True,
+                )
+                if soup.title
+                else ""
+            )
+
+            _LOGGER.error(
+                "HTF: consumption data missing "
+                "(HTTP %s, %s bytes, title=%r)",
+                response.status_code,
+                len(response.text),
+                title[:120],
+            )
+
             raise UpdateFailed(
                 "HTF consumption data was not found"
             )
@@ -769,7 +864,6 @@ class HTFClient:
         return data
 
     def fetch(self) -> dict[str, Any]:
-        """Fetch all HTF data."""
         try:
             self.login()
 
@@ -812,7 +906,6 @@ async def _async_update_data(
     customer: str,
     pin: str,
 ) -> dict[str, Any]:
-    """Fetch HTF data outside event loop."""
     client = HTFClient(
         customer,
         pin,
@@ -826,8 +919,6 @@ async def _async_update_data(
 class HTFCoordinator(
     DataUpdateCoordinator[dict[str, Any]]
 ):
-    """Coordinate HTF updates."""
-
     def __init__(
         self,
         hass: HomeAssistant,
@@ -857,7 +948,6 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities,
 ) -> None:
-    """Set up HTF sensors."""
     customer = entry.data.get(
         "customer",
         entry.data.get(
@@ -903,43 +993,23 @@ async def async_setup_entry(
         _async_first_refresh(coordinator)
     )
 
-    entities = [
-        HTFCurrentMonthSensor(
-            coordinator
-        ),
-        HTFDailyAverageSensor(
-            coordinator
-        ),
-        HTFCurrentYearSensor(
-            coordinator
-        ),
-        HTFReturnTemperatureSensor(
-            coordinator
-        ),
-        HTFBalanceSensor(
-            coordinator
-        ),
-        HTFLatestBillSensor(
-            coordinator
-        ),
-        HTFLatestBillDueDateSensor(
-            coordinator
-        ),
-        HTFBillStatusSensor(
-            coordinator
-        ),
-    ]
-
     async_add_entities(
-        entities
+        [
+            HTFCurrentMonthSensor(coordinator),
+            HTFDailyAverageSensor(coordinator),
+            HTFCurrentYearSensor(coordinator),
+            HTFReturnTemperatureSensor(coordinator),
+            HTFBalanceSensor(coordinator),
+            HTFLatestBillSensor(coordinator),
+            HTFLatestBillDueDateSensor(coordinator),
+            HTFBillStatusSensor(coordinator),
+        ]
     )
 
 
 class HTFEntity(
     CoordinatorEntity[HTFCoordinator]
 ):
-    """Base HTF entity."""
-
     _attr_has_entity_name = True
 
     def __init__(
@@ -970,8 +1040,6 @@ class HTFCurrentMonthSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Current month's consumption."""
-
     _attr_name = "Current Month"
     _attr_native_unit_of_measurement = (
         UnitOfEnergy.MEGA_WATT_HOUR
@@ -998,8 +1066,6 @@ class HTFDailyAverageSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Daily average consumption."""
-
     _attr_name = "Daily Average"
     _attr_native_unit_of_measurement = (
         "kWh/day"
@@ -1018,16 +1084,13 @@ class HTFDailyAverageSensor(
         if current is None:
             return None
 
-        now = dt_util.now()
+        days = dt_util.now().day
 
-        days_elapsed = now.day
-
-        if days_elapsed <= 0:
+        if days <= 0:
             return None
 
         return round(
-            (current * 1000)
-            / days_elapsed,
+            current * 1000 / days,
             1,
         )
 
@@ -1036,8 +1099,6 @@ class HTFCurrentYearSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Current year's consumption."""
-
     _attr_name = "Current Year"
     _attr_native_unit_of_measurement = (
         UnitOfEnergy.MEGA_WATT_HOUR
@@ -1064,8 +1125,6 @@ class HTFReturnTemperatureSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """District heating return temperature."""
-
     _attr_name = "Return Temperature"
     _attr_native_unit_of_measurement = (
         UnitOfTemperature.CELSIUS
@@ -1090,12 +1149,8 @@ class HTFBalanceSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Current account balance."""
-
     _attr_name = "Balance"
-    _attr_native_unit_of_measurement = (
-        "DKK"
-    )
+    _attr_native_unit_of_measurement = "DKK"
 
     @property
     def native_value(
@@ -1111,12 +1166,8 @@ class HTFLatestBillSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Latest bill amount."""
-
     _attr_name = "Latest Bill"
-    _attr_native_unit_of_measurement = (
-        "DKK"
-    )
+    _attr_native_unit_of_measurement = "DKK"
 
     @property
     def native_value(
@@ -1132,8 +1183,6 @@ class HTFLatestBillDueDateSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Latest bill due date."""
-
     _attr_name = "Latest Bill Due Date"
 
     @property
@@ -1150,8 +1199,6 @@ class HTFBillStatusSensor(
     HTFEntity,
     SensorEntity,
 ):
-    """Current bill status."""
-
     _attr_name = "Bill Status"
 
     @property
