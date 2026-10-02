@@ -26,14 +26,14 @@ from homeassistant.util import dt as dt_util
 DOMAIN = "htf"
 BASE = "https://selvbetjening.htf.dk"
 
-# HTF is polled once every 24 hours.
+# Poll HTF once every 24 hours.
 SCAN_INTERVAL = timedelta(hours=24)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _clean_number(value: Any) -> float | None:
-    """Convert a value to a number."""
+    """Convert a value to a float."""
     if value is None:
         return None
 
@@ -66,7 +66,7 @@ def _clean_number(value: Any) -> float | None:
 
 
 def _find_first_number(value: Any) -> float | None:
-    """Find the first number recursively."""
+    """Find the first numeric value recursively."""
     if isinstance(value, (int, float)):
         return float(value)
 
@@ -85,6 +85,187 @@ def _find_first_number(value: Any) -> float | None:
                 return result
 
     return _clean_number(value)
+
+
+def _get_meter(
+    consumption: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the first meter from HTF consumption data."""
+    meters = consumption.get("meters")
+
+    if isinstance(meters, list) and meters:
+        first_meter = meters[0]
+
+        if isinstance(first_meter, dict):
+            return first_meter
+
+    return {}
+
+
+def _get_year_data(
+    consumption: dict[str, Any],
+) -> Any:
+    """Return yearly consumption data."""
+    meter = _get_meter(consumption)
+
+    return meter.get(
+        "yearData",
+        [],
+    )
+
+
+def _get_month_data(
+    consumption: dict[str, Any],
+) -> Any:
+    """Return monthly consumption data."""
+    meter = _get_meter(consumption)
+
+    return meter.get(
+        "monthData",
+        [],
+    )
+
+
+def _get_meter_info(
+    consumption: dict[str, Any],
+) -> Any:
+    """Return meter information."""
+    meter = _get_meter(consumption)
+
+    return meter.get(
+        "meterInfo",
+        [],
+    )
+
+
+def _extract_current_month(
+    consumption: dict[str, Any],
+) -> float | None:
+    """Extract current-month consumption in MWh."""
+    month_data = _get_month_data(
+        consumption
+    )
+
+    if not isinstance(
+        month_data,
+        list,
+    ):
+        return None
+
+    now = dt_util.now()
+
+    current_month = now.month
+    current_year = now.year
+
+    # First try to identify the current month/year.
+    for item in month_data:
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        text = json.dumps(
+            item,
+            ensure_ascii=False,
+        ).lower()
+
+        if (
+            str(current_month) in text
+            and str(current_year) in text
+        ):
+            value = _find_first_number(
+                item.get("value")
+                or item.get("consumption")
+                or item.get("amount")
+                or item.get("mwh")
+            )
+
+            if value is not None:
+                return value
+
+    # HTF's monthData can contain a structure where the
+    # month/year isn't represented in the same way.
+    # In that case, use the last available numeric value.
+    for item in reversed(month_data):
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        value = _find_first_number(
+            item.get("value")
+            or item.get("consumption")
+            or item.get("amount")
+            or item.get("mwh")
+        )
+
+        if value is not None:
+            return value
+
+    return None
+
+
+def _extract_current_year(
+    consumption: dict[str, Any],
+) -> float | None:
+    """Extract current-year consumption in MWh."""
+    year_data = _get_year_data(
+        consumption
+    )
+
+    if not isinstance(
+        year_data,
+        list,
+    ):
+        return None
+
+    now = dt_util.now()
+
+    # Try to identify the current year.
+    for item in year_data:
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        text = json.dumps(
+            item,
+            ensure_ascii=False,
+        ).lower()
+
+        if str(now.year) in text:
+            value = _find_first_number(
+                item.get("value")
+                or item.get("consumption")
+                or item.get("amount")
+                or item.get("mwh")
+            )
+
+            if value is not None:
+                return value
+
+    # Fallback to the last available value.
+    for item in reversed(year_data):
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        value = _find_first_number(
+            item.get("value")
+            or item.get("consumption")
+            or item.get("amount")
+            or item.get("mwh")
+        )
+
+        if value is not None:
+            return value
+
+    return None
 
 
 class HTFClient:
@@ -112,7 +293,9 @@ class HTFClient:
 
     def _login(self) -> None:
         """Log in to HTF."""
-        _LOGGER.debug("HTF: opening login page")
+        _LOGGER.debug(
+            "HTF: opening login page"
+        )
 
         response = self.session.get(
             f"{BASE}/login",
@@ -120,7 +303,9 @@ class HTFClient:
         )
         response.raise_for_status()
 
-        _LOGGER.debug("HTF: submitting login")
+        _LOGGER.debug(
+            "HTF: submitting login"
+        )
 
         response = self.session.post(
             f"{BASE}/umbraco/surface/login2/PostLogin",
@@ -138,7 +323,9 @@ class HTFClient:
         )
         response.raise_for_status()
 
-        _LOGGER.debug("HTF: opening dashboard")
+        _LOGGER.debug(
+            "HTF: opening dashboard"
+        )
 
         dashboard = self.session.get(
             f"{BASE}/dashboard/",
@@ -162,7 +349,7 @@ class HTFClient:
         )
 
     def _select_consumption_point(self) -> None:
-        """Select the customer's consumption point."""
+        """Select the consumption point dynamically."""
         _LOGGER.debug(
             "HTF: finding consumption point"
         )
@@ -243,6 +430,9 @@ class HTFClient:
         )
         response.raise_for_status()
 
+        # HTF may return something other than literal
+        # "OK" even though the selected consumption
+        # point works correctly.
         if response.text.strip() != "OK":
             _LOGGER.debug(
                 "HTF: SetSelectedConsumption returned "
@@ -485,8 +675,8 @@ class HTFClient:
                     )
 
                     if date_match:
-                        due_date = (
-                            date_match.group(0)
+                        due_date = date_match.group(
+                            0
                         )
 
         return {
@@ -521,6 +711,33 @@ class HTFClient:
         if not consumption:
             raise UpdateFailed(
                 "HTF consumption data was not found."
+            )
+
+        # HTF returns:
+        #
+        # {
+        #     "meters": [
+        #         {
+        #             "yearData": ...,
+        #             "monthData": ...,
+        #             "meterInfo": ...
+        #         }
+        #     ]
+        # }
+        #
+        # Validate that the expected meter structure
+        # exists before considering the fetch successful.
+        meters = consumption.get(
+            "meters"
+        )
+
+        if not isinstance(
+            meters,
+            list,
+        ) or not meters:
+            raise UpdateFailed(
+                "HTF returned consumption data "
+                "without any meters."
             )
 
         _LOGGER.debug(
@@ -621,7 +838,7 @@ class HTFCoordinator(
 async def _async_first_refresh(
     coordinator: HTFCoordinator,
 ) -> None:
-    """Run the first refresh and log failures."""
+    """Run first refresh in background."""
     try:
         _LOGGER.debug(
             "HTF: starting first background refresh"
@@ -673,12 +890,8 @@ async def async_setup_entry(
         entities
     )
 
-    # IMPORTANT:
-    #
-    # Do not await this here because that would make
-    # Home Assistant wait for the HTF website.
-    #
-    # The first refresh happens in the background.
+    # Do the first HTF request in the background.
+    # This prevents HTF from blocking Home Assistant startup.
     hass.async_create_task(
         _async_first_refresh(
             coordinator
@@ -708,9 +921,6 @@ class HTFBaseSensor(
         """Return device information."""
         return DeviceInfo(
             # Stable identifier.
-            #
-            # This prevents future versions from creating
-            # another Home Assistant device.
             identifiers={
                 (DOMAIN, "heating")
             },
@@ -723,7 +933,7 @@ class HTFBaseSensor(
 
     @property
     def available(self) -> bool:
-        """Return availability."""
+        """Return sensor availability."""
         return (
             super().available
             and self.coordinator.data is not None
@@ -744,7 +954,7 @@ class HTFBaseSensor(
     def _return_temperature(
         self,
     ) -> dict[str, Any]:
-        """Return temperature data."""
+        """Return return temperature data."""
         if self.coordinator.data is None:
             return {}
 
@@ -766,152 +976,6 @@ class HTFBaseSensor(
         )
 
 
-def _get_year_data(
-    consumption: dict[str, Any],
-) -> Any:
-    """Return yearly data."""
-    return consumption.get(
-        "yearData",
-        [],
-    )
-
-
-def _get_month_data(
-    consumption: dict[str, Any],
-) -> Any:
-    """Return monthly data."""
-    return consumption.get(
-        "monthData",
-        [],
-    )
-
-
-def _extract_current_month(
-    consumption: dict[str, Any],
-) -> float | None:
-    """Extract current month consumption."""
-    month_data = _get_month_data(
-        consumption
-    )
-
-    if not isinstance(
-        month_data,
-        list,
-    ):
-        return None
-
-    now = dt_util.now()
-
-    current_month = now.month
-    current_year = now.year
-
-    for item in month_data:
-        if not isinstance(
-            item,
-            dict,
-        ):
-            continue
-
-        text = json.dumps(
-            item,
-            ensure_ascii=False,
-        ).lower()
-
-        if (
-            str(current_month) in text
-            and str(current_year) in text
-        ):
-            value = _find_first_number(
-                item.get("value")
-                or item.get("consumption")
-                or item.get("amount")
-                or item.get("mwh")
-            )
-
-            if value is not None:
-                return value
-
-    # Fallback.
-    for item in reversed(
-        month_data
-    ):
-        if isinstance(
-            item,
-            dict,
-        ):
-            value = _find_first_number(
-                item.get("value")
-                or item.get("consumption")
-                or item.get("amount")
-                or item.get("mwh")
-            )
-
-            if value is not None:
-                return value
-
-    return None
-
-
-def _extract_current_year(
-    consumption: dict[str, Any],
-) -> float | None:
-    """Extract current year consumption."""
-    year_data = _get_year_data(
-        consumption
-    )
-
-    if not isinstance(
-        year_data,
-        list,
-    ):
-        return None
-
-    now = dt_util.now()
-
-    for item in year_data:
-        if not isinstance(
-            item,
-            dict,
-        ):
-            continue
-
-        text = json.dumps(
-            item,
-            ensure_ascii=False,
-        ).lower()
-
-        if str(now.year) in text:
-            value = _find_first_number(
-                item.get("value")
-                or item.get("consumption")
-                or item.get("amount")
-                or item.get("mwh")
-            )
-
-            if value is not None:
-                return value
-
-    # Fallback.
-    for item in reversed(
-        year_data
-    ):
-        if isinstance(
-            item,
-            dict,
-        ):
-            value = _find_first_number(
-                item.get("value")
-                or item.get("consumption")
-                or item.get("amount")
-                or item.get("mwh")
-            )
-
-            if value is not None:
-                return value
-
-    return None
-
-
 class HTFCurrentMonth(
     HTFBaseSensor
 ):
@@ -924,11 +988,7 @@ class HTFCurrentMonth(
         UnitOfEnergy.MEGA_WATT_HOUR
     )
     _attr_device_class = "energy"
-
-    # The value represents accumulated consumption
-    # for the current month.
     _attr_state_class = "total"
-
     _attr_icon = "mdi:fire"
 
     def __init__(
@@ -948,7 +1008,7 @@ class HTFCurrentMonth(
     def native_value(
         self,
     ) -> float | None:
-        """Return current month."""
+        """Return current month consumption."""
         return _extract_current_month(
             self._consumption()
         )
@@ -957,16 +1017,15 @@ class HTFCurrentMonth(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return historical data."""
+        """Return monthly history."""
         consumption = self._consumption()
 
         return {
             "month_data": _get_month_data(
                 consumption
             ),
-            "meter_info": consumption.get(
-                "meterInfo",
-                [],
+            "meter_info": _get_meter_info(
+                consumption
             ),
             "last_update": (
                 self.coordinator.data.get(
@@ -1021,6 +1080,7 @@ class HTFCurrentMonthDailyAverage(
         if day <= 0:
             return None
 
+        # MWh -> kWh, then divide by elapsed days.
         return round(
             (monthly * 1000) / day,
             2,
@@ -1056,11 +1116,7 @@ class HTFCurrentYear(
         UnitOfEnergy.MEGA_WATT_HOUR
     )
     _attr_device_class = "energy"
-
-    # The value represents accumulated consumption
-    # for the current year.
     _attr_state_class = "total"
-
     _attr_icon = "mdi:fire"
 
     def __init__(
@@ -1080,7 +1136,7 @@ class HTFCurrentYear(
     def native_value(
         self,
     ) -> float | None:
-        """Return current year."""
+        """Return current year consumption."""
         return _extract_current_year(
             self._consumption()
         )
@@ -1089,7 +1145,7 @@ class HTFCurrentYear(
     def extra_state_attributes(
         self,
     ) -> dict[str, Any]:
-        """Return historical data."""
+        """Return yearly and monthly history."""
         consumption = self._consumption()
 
         return {
@@ -1099,9 +1155,8 @@ class HTFCurrentYear(
             "month_data": _get_month_data(
                 consumption
             ),
-            "meter_info": consumption.get(
-                "meterInfo",
-                [],
+            "meter_info": _get_meter_info(
+                consumption
             ),
             "last_update": (
                 self.coordinator.data.get(
@@ -1233,7 +1288,7 @@ class HTFBalance(
     def native_value(
         self,
     ) -> float | None:
-        """Return balance."""
+        """Return account balance."""
         return self._bills().get(
             "balance"
         )
@@ -1242,7 +1297,7 @@ class HTFBalance(
 class HTFLatestBill(
     HTFBaseSensor
 ):
-    """Latest bill."""
+    """Latest bill amount."""
 
     _attr_name = "HTF Latest Bill"
     _attr_native_unit_of_measurement = "DKK"
@@ -1265,7 +1320,7 @@ class HTFLatestBill(
     def native_value(
         self,
     ) -> float | None:
-        """Return latest bill."""
+        """Return latest bill amount."""
         return self._bills().get(
             "latest_bill"
         )
@@ -1298,7 +1353,7 @@ class HTFLatestBillDueDate(
     def native_value(
         self,
     ) -> str | None:
-        """Return due date."""
+        """Return latest bill due date."""
         return self._bills().get(
             "due_date"
         )
