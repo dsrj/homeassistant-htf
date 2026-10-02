@@ -21,9 +21,6 @@ _LOGGER = logging.getLogger(__name__)
 BASE = "https://selvbetjening.htf.dk"
 SCAN_INTERVAL = timedelta(hours=24)
 
-# HTF's own CoolingController.js identifies these meters:
-# FV-M3  -> counterNumber 2
-# FV-RT  -> counterNumber 5
 COUNTER_M3 = 2
 COUNTER_RETURN_TEMPERATURE = 5
 
@@ -36,7 +33,7 @@ class ReturnTemperatureClient:
         customer: str,
         pin: str,
     ) -> None:
-        """Initialize the client."""
+        """Initialize."""
         self.customer = customer
         self.pin = pin
 
@@ -155,7 +152,7 @@ class ReturnTemperatureClient:
     def _get_consumption_json(
         html: str,
     ) -> dict[str, Any]:
-        """Extract HTF consumption JSON from the page."""
+        """Extract HTF consumption JSON."""
         soup = BeautifulSoup(
             html,
             "html.parser",
@@ -194,34 +191,90 @@ class ReturnTemperatureClient:
         return data
 
     @staticmethod
+    def _collect_all_meters(
+        data: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Collect meters from all known HTF JSON locations."""
+        meters: list[dict[str, Any]] = []
+
+        for key in (
+            "meters",
+            "returnTempMeters",
+        ):
+            value = data.get(key)
+
+            if not isinstance(
+                value,
+                list,
+            ):
+                continue
+
+            for meter in value:
+                if not isinstance(
+                    meter,
+                    dict,
+                ):
+                    continue
+
+                if meter not in meters:
+                    meters.append(meter)
+
+        return meters
+
+    @staticmethod
+    def _meter_matches(
+        meter: dict[str, Any],
+        counter_number: int,
+        meter_type2: str | None = None,
+    ) -> bool:
+        """Check whether a meter matches the requested type."""
+        info = meter.get(
+            "meterInfo"
+        )
+
+        if not isinstance(
+            info,
+            dict,
+        ):
+            return False
+
+        if meter_type2:
+            actual_type = str(
+                info.get(
+                    "meterType2",
+                    ""
+                )
+            ).upper()
+
+            if actual_type == meter_type2.upper():
+                return True
+
+        value = info.get(
+            "counterNumber"
+        )
+
+        try:
+            return int(value) == counter_number
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+    @staticmethod
     def _find_meter(
         meters: list[dict[str, Any]],
         counter_number: int,
+        meter_type2: str | None = None,
     ) -> dict[str, Any] | None:
-        """Find a meter by HTF counter number."""
+        """Find a meter."""
         for meter in meters:
-            meter_info = meter.get(
-                "meterInfo"
-            )
-
-            if not isinstance(
-                meter_info,
-                dict,
+            if ReturnTemperatureClient._meter_matches(
+                meter,
+                counter_number,
+                meter_type2,
             ):
-                continue
-
-            value = meter_info.get(
-                "counterNumber"
-            )
-
-            try:
-                if int(value) == counter_number:
-                    return meter
-            except (
-                TypeError,
-                ValueError,
-            ):
-                continue
+                return meter
 
         return None
 
@@ -229,7 +282,7 @@ class ReturnTemperatureClient:
     def _build_month_values(
         meter: dict[str, Any],
     ) -> dict[str, float]:
-        """Convert HTF monthData into YYYY-MM -> value."""
+        """Convert HTF monthData into YYYY-MM values."""
         result: dict[str, float] = {}
 
         month_data = meter.get(
@@ -261,10 +314,7 @@ class ReturnTemperatureClient:
                 "values"
             )
 
-            if not isinstance(
-                year,
-                int,
-            ):
+            if year is None:
                 continue
 
             if not isinstance(
@@ -276,6 +326,14 @@ class ReturnTemperatureClient:
             if not isinstance(
                 values,
                 list,
+            ):
+                continue
+
+            try:
+                year_number = int(year)
+            except (
+                TypeError,
+                ValueError,
             ):
                 continue
 
@@ -295,75 +353,90 @@ class ReturnTemperatureClient:
                 if not 1 <= month_number <= 12:
                     continue
 
-                key = (
-                    f"{year:04d}-"
+                result[
+                    f"{year_number:04d}-"
                     f"{month_number:02d}"
-                )
-
-                result[key] = numeric_value
+                ] = numeric_value
 
         return result
 
     @staticmethod
-    def _calculate_latest_return_temperature(
+    def _calculate_temperature(
         data: dict[str, Any],
     ) -> tuple[float, str]:
-        """Calculate the latest HTF return temperature."""
-        meters = data.get(
-            "meters"
+        """Calculate return temperature exactly like HTF JavaScript."""
+        meters = (
+            ReturnTemperatureClient._collect_all_meters(
+                data
+            )
         )
 
-        # Some HTF pages use returnTempMeters
-        # before the JavaScript normalizes them to meters.
-        if not isinstance(
-            meters,
-            list,
-        ):
-            meters = data.get(
-                "returnTempMeters"
-            )
-
-        if not isinstance(
-            meters,
-            list,
-        ):
+        if not meters:
             raise UpdateFailed(
-                "HTF meter data not found"
+                "HTF contains no meter data"
             )
-
-        normalized_meters = [
-            meter
-            for meter in meters
-            if isinstance(
-                meter,
-                dict,
-            )
-        ]
 
         return_meter = (
             ReturnTemperatureClient._find_meter(
-                normalized_meters,
+                meters,
                 COUNTER_RETURN_TEMPERATURE,
+                "FV-RT",
             )
         )
 
         volume_meter = (
             ReturnTemperatureClient._find_meter(
-                normalized_meters,
+                meters,
                 COUNTER_M3,
+                "FV-M3",
             )
         )
 
         if return_meter is None:
+            available = []
+
+            for meter in meters:
+                info = meter.get(
+                    "meterInfo"
+                )
+
+                if isinstance(
+                    info,
+                    dict,
+                ):
+                    available.append(
+                        {
+                            "counterNumber": info.get(
+                                "counterNumber"
+                            ),
+                            "meterType2": info.get(
+                                "meterType2"
+                            ),
+                            "meterType": info.get(
+                                "meterType"
+                            ),
+                            "unit": info.get(
+                                "unit"
+                            ),
+                        }
+                    )
+
+            _LOGGER.warning(
+                "HTF return temperature: "
+                "FV-RT meter not found. "
+                "Available meters=%s",
+                available,
+            )
+
             raise UpdateFailed(
                 "HTF return-temperature meter "
-                "(counterNumber 5) not found"
+                "(FV-RT / counterNumber 5) not found"
             )
 
         if volume_meter is None:
             raise UpdateFailed(
                 "HTF M3 meter "
-                "(counterNumber 2) not found"
+                "(FV-M3 / counterNumber 2) not found"
             )
 
         return_values = (
@@ -400,11 +473,12 @@ class ReturnTemperatureClient:
                 "meters have no common dates"
             )
 
-        # HTF's own JavaScript uses:
+        # HTF CoolingController.js does:
         #
-        # dataRT / dataM3
+        # completeLineChartValues =
+        #     dataRT.map((rt, i) => rt / dataM3[i])
         #
-        # for the return-temperature chart.
+        # Therefore we reproduce exactly that calculation.
         for date_key in reversed(
             common_dates
         ):
@@ -423,17 +497,6 @@ class ReturnTemperatureClient:
                 return_value / volume_value
             )
 
-            if not (
-                -20 <= temperature <= 100
-            ):
-                _LOGGER.warning(
-                    "HTF calculated an unusual "
-                    "return temperature: %.3f °C "
-                    "for %s",
-                    temperature,
-                    date_key,
-                )
-
             return (
                 round(
                     temperature,
@@ -444,19 +507,14 @@ class ReturnTemperatureClient:
 
         raise UpdateFailed(
             "HTF return-temperature calculation "
-            "failed because the latest M3 value is zero"
+            "failed because M3 values are zero"
         )
 
     def fetch(self) -> dict[str, Any]:
-        """Fetch and calculate HTF return temperature."""
+        """Fetch HTF return temperature."""
         try:
             self._login()
             self._select_consumption_point()
-
-            _LOGGER.debug(
-                "HTF return temperature: "
-                "requesting /forbrug/"
-            )
 
             response = self.session.get(
                 f"{BASE}/forbrug/",
@@ -469,7 +527,7 @@ class ReturnTemperatureClient:
             )
 
             temperature, date_key = (
-                self._calculate_latest_return_temperature(
+                self._calculate_temperature(
                     data
                 )
             )
