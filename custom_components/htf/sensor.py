@@ -29,6 +29,9 @@ from .return_temperature import ReturnTemperatureClient
 BASE = "https://selvbetjening.htf.dk"
 SCAN_INTERVAL = timedelta(hours=24)
 
+# Historical portal data is refreshed much less frequently.
+HISTORIC_SCAN_INTERVAL = timedelta(days=15)
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -754,6 +757,93 @@ class HTFClient:
             ),
         }
 
+    # ============================================================
+    # HISTORIC DATA
+    #
+    # This is deliberately separate from fetch().
+    #
+    # Existing fetch() above is NOT changed.
+    # Historic data is downloaded every 15 days.
+    # ============================================================
+
+    def fetch_historic(
+        self,
+    ) -> dict[str, Any]:
+        """Fetch complete historical portal datasets."""
+        _LOGGER.debug(
+            "HTF historic: starting 15-day update"
+        )
+
+        self._login()
+        self._select_consumption_point()
+
+        # --------------------------------------------------------
+        # COMPLETE CONSUMPTION HISTORY
+        # --------------------------------------------------------
+
+        consumption_html = self._page(
+            "/forbrug/"
+        )
+
+        consumption = self._json_block(
+            consumption_html,
+            "consumption-data-json",
+        )
+
+        if not consumption:
+            raise UpdateFailed(
+                "HTF historic consumption JSON not found"
+            )
+
+        # --------------------------------------------------------
+        # COMPLETE BILL HISTORY
+        # --------------------------------------------------------
+
+        bills_html = self._page(
+            "/kundeoplysninger/kontoudtog/"
+        )
+
+        bills = self._bills(
+            bills_html
+        )
+
+        # --------------------------------------------------------
+        # COMPLETE RETURN-TEMPERATURE HISTORY
+        #
+        # IMPORTANT:
+        # This is the RAW portal JSON from /returtemperatur/.
+        # It does not use or alter the existing return-temperature
+        # calculation.
+        # --------------------------------------------------------
+
+        return_temperature_html = self._page(
+            "/returtemperatur/"
+        )
+
+        return_temperature = self._json_block(
+            return_temperature_html,
+            "consumption-data-json",
+        )
+
+        if not return_temperature:
+            raise UpdateFailed(
+                "HTF historic return-temperature JSON not found"
+            )
+
+        _LOGGER.info(
+            "HTF historic: complete portal history "
+            "download successful"
+        )
+
+        return {
+            "consumption": consumption,
+            "bills": bills,
+            "return_temperature": return_temperature,
+            "last_update": (
+                dt_util.utcnow().isoformat()
+            ),
+        }
+
 
 class HTFCoordinator(
     DataUpdateCoordinator[
@@ -803,6 +893,54 @@ class HTFCoordinator(
             ) from err
 
 
+class HTFHistoricCoordinator(
+    DataUpdateCoordinator[
+        dict[str, Any]
+    ]
+):
+    """Coordinate HTF historical portal data."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        customer: str,
+        pin: str,
+    ) -> None:
+        """Initialize."""
+        self.client = HTFClient(
+            customer,
+            pin,
+        )
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="HTF Historical Portal Data",
+            update_interval=HISTORIC_SCAN_INTERVAL,
+        )
+
+    async def _async_update_data(
+        self,
+    ) -> dict[str, Any]:
+        """Fetch historical HTF portal data."""
+        try:
+            return await self.hass.async_add_executor_job(
+                self.client.fetch_historic
+            )
+
+        except UpdateFailed:
+            raise
+
+        except Exception as err:
+            _LOGGER.exception(
+                "HTF historic: unexpected fetch error"
+            )
+
+            raise UpdateFailed(
+                f"Unable to fetch HTF historical data: {err}"
+            ) from err
+
+
 async def _first_refresh(
     coordinator: HTFCoordinator,
 ) -> None:
@@ -821,6 +959,27 @@ async def _first_refresh(
     except Exception:
         _LOGGER.exception(
             "HTF: first refresh failed"
+        )
+
+
+async def _historic_first_refresh(
+    coordinator: HTFHistoricCoordinator,
+) -> None:
+    """Perform the first historical refresh in background."""
+    try:
+        _LOGGER.debug(
+            "HTF historic: starting first background refresh"
+        )
+
+        await coordinator.async_config_entry_first_refresh()
+
+        _LOGGER.info(
+            "HTF historic: first refresh completed successfully"
+        )
+
+    except Exception:
+        _LOGGER.exception(
+            "HTF historic: first refresh failed"
         )
 
 
@@ -1372,12 +1531,226 @@ class HTFBillStatus(
         return "Settled"
 
 
+# =====================================================================
+# HISTORIC SENSORS
+# =====================================================================
+
+
+class HTFHistoricBase(
+    CoordinatorEntity[HTFHistoricCoordinator],
+    SensorEntity,
+):
+    """Base class for historic HTF sensors."""
+
+    _attr_has_entity_name = False
+
+    def __init__(
+        self,
+        coordinator: HTFHistoricCoordinator,
+    ) -> None:
+        """Initialize."""
+        super().__init__(
+            coordinator
+        )
+
+    @property
+    def device_info(
+        self,
+    ) -> DeviceInfo:
+        """Return historic device information."""
+        return DeviceInfo(
+            identifiers={
+                (
+                    DOMAIN,
+                    "historic",
+                )
+            },
+            name="HTF Historical Data",
+            manufacturer=(
+                "Høje Taastrup Fjernvarme"
+            ),
+            configuration_url=BASE,
+        )
+
+
+class HTFHistoricConsumption(
+    HTFHistoricBase
+):
+    """Complete HTF consumption history."""
+
+    _attr_name = (
+        "HTF Historic Consumption"
+    )
+
+    _attr_icon = "mdi:table"
+
+    def __init__(
+        self,
+        coordinator: HTFHistoricCoordinator,
+    ) -> None:
+        """Initialize."""
+        super().__init__(
+            coordinator
+        )
+
+        self._attr_unique_id = (
+            "htf_historic_consumption"
+        )
+
+    @property
+    def native_value(
+        self,
+    ) -> str:
+        """Return availability state."""
+        return "Available"
+
+    @property
+    def extra_state_attributes(
+        self,
+    ) -> dict[str, Any]:
+        """Return complete HTF consumption history."""
+        data = self.coordinator.data or {}
+
+        return {
+            "source": (
+                "HTF /forbrug/"
+            ),
+            "last_historic_update": data.get(
+                "last_update"
+            ),
+            "portal_json": data.get(
+                "consumption",
+                {},
+            ),
+        }
+
+
+class HTFHistoricBills(
+    HTFHistoricBase
+):
+    """Complete HTF billing history."""
+
+    _attr_name = (
+        "HTF Historic Bills"
+    )
+
+    _attr_icon = "mdi:receipt-text"
+
+    def __init__(
+        self,
+        coordinator: HTFHistoricCoordinator,
+    ) -> None:
+        """Initialize."""
+        super().__init__(
+            coordinator
+        )
+
+        self._attr_unique_id = (
+            "htf_historic_bills"
+        )
+
+    @property
+    def native_value(
+        self,
+    ) -> str:
+        """Return availability state."""
+        return "Available"
+
+    @property
+    def extra_state_attributes(
+        self,
+    ) -> dict[str, Any]:
+        """Return complete HTF billing history."""
+        data = self.coordinator.data or {}
+
+        bills = data.get(
+            "bills",
+            {},
+        )
+
+        if not isinstance(
+            bills,
+            dict,
+        ):
+            bills = {}
+
+        return {
+            "source": (
+                "HTF /kundeoplysninger/kontoudtog/"
+            ),
+            "last_historic_update": data.get(
+                "last_update"
+            ),
+            "portal_tables": bills.get(
+                "tables",
+                [],
+            ),
+        }
+
+
+class HTFHistoricReturnTemperature(
+    HTFHistoricBase
+):
+    """Complete HTF return-temperature history."""
+
+    _attr_name = (
+        "HTF Historic Return Temperature"
+    )
+
+    _attr_icon = "mdi:thermometer"
+
+    def __init__(
+        self,
+        coordinator: HTFHistoricCoordinator,
+    ) -> None:
+        """Initialize."""
+        super().__init__(
+            coordinator
+        )
+
+        self._attr_unique_id = (
+            "htf_historic_return_temperature"
+        )
+
+    @property
+    def native_value(
+        self,
+    ) -> str:
+        """Return availability state."""
+        return "Available"
+
+    @property
+    def extra_state_attributes(
+        self,
+    ) -> dict[str, Any]:
+        """Return complete HTF return-temperature history."""
+        data = self.coordinator.data or {}
+
+        return {
+            "source": (
+                "HTF /returtemperatur/"
+            ),
+            "last_historic_update": data.get(
+                "last_update"
+            ),
+            "portal_json": data.get(
+                "return_temperature",
+                {},
+            ),
+        }
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities,
 ) -> None:
     """Set up HTF sensors."""
+
+    # ================================================================
+    # EXISTING WORKING COORDINATOR
+    # ================================================================
+
     coordinator = HTFCoordinator(
         hass,
         entry.data["customer"],
@@ -1423,8 +1796,50 @@ async def async_setup_entry(
         ]
     )
 
+    # Existing 24-hour refresh remains unchanged.
     hass.async_create_task(
         _first_refresh(
             coordinator
+        )
+    )
+
+    # ================================================================
+    # SEPARATE HISTORIC COORDINATOR
+    #
+    # This does NOT affect the existing coordinator above.
+    # It refreshes only once every 15 days.
+    # ================================================================
+
+    historic_coordinator = HTFHistoricCoordinator(
+        hass,
+        entry.data["customer"],
+        entry.data["pin"],
+    )
+
+    hass.data[DOMAIN][
+        entry.entry_id
+    ]["historic_coordinator"] = (
+        historic_coordinator
+    )
+
+    async_add_entities(
+        [
+            HTFHistoricConsumption(
+                historic_coordinator
+            ),
+            HTFHistoricBills(
+                historic_coordinator
+            ),
+            HTFHistoricReturnTemperature(
+                historic_coordinator
+            ),
+        ]
+    )
+
+    # Fetch the historic portal data once immediately.
+    # After that, it refreshes every 15 days.
+    hass.async_create_task(
+        _historic_first_refresh(
+            historic_coordinator
         )
     )
