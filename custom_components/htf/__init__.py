@@ -6,7 +6,10 @@ from homeassistant.core import HomeAssistant
 
 DOMAIN = "htf"
 
-PLATFORMS = ["sensor"]
+PLATFORMS = [
+    "sensor",
+    "historic",
+]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
